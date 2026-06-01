@@ -1,0 +1,52 @@
+name: "ember-275m"
+state:
+  repo_id: "Kush26/ember-checkpoints"
+  branch: "checkpoints"
+  checkpoint_limit: 2
+  push_every: 500
+  token_env: "HF_TOKEN"
+  private: true
+
+providers:
+  modal:
+    gpu: "A100"
+    gpu_count: 1
+    cpu: 8
+    memory: 32768
+    timeout: 86400
+
+profiles:
+  default:
+    per_device_train_batch_size: 4
+    gradient_accumulation_steps: 8
+    learning_rate: 3e-4
+    max_steps: 60000
+    probe_memory: false
+    data_cache: false
+
+  modal:
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 32  # 8 * 32 * 1 GPU = 256 seq = 524,288 tokens/step
+    learning_rate: 3e-4
+    max_steps: 60000
+    probe_memory: false
+    data_cache: true
+
+  kaggle:
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 64  # 2 * 64 * 2 GPUs (DDP) = 256 seq = 524,288 tokens/step
+    learning_rate: 3e-4
+    max_steps: 60000
+    probe_memory: true
+    data_cache: false
+    fp16: true
+    ddp_find_unused_parameters: false
+
+  colab:
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 128 # 2 * 128 * 1 GPU = 256 seq = 524,288 tokens/step
+    learning_rate: 3e-4
+    max_steps: 60000
+    probe_memory: true
+    data_cache: false
+    fp16: true

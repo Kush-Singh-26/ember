@@ -1,0 +1,126 @@
+import os
+import sys
+import torch
+from transformers import TrainingArguments, AutoTokenizer
+from forge import ForgeTrainer
+
+# Ensure current directory is in system path for importing model and data packages
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from model import EmberConfig, EmberForCausalLM
+from data import get_pretraining_mixture, PackedDataCollator
+
+def main():
+    print("=== Starting Ember-275M Pre-training Pipeline ===")
+    
+    # 1. Detect device and hyperparameter support
+    device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Detected training device: {device_name}")
+    
+    # Dynamic bf16 support check (A100 supports bf16, T4 only supports fp16)
+    use_bf16 = False
+    if torch.cuda.is_available():
+        use_bf16 = torch.cuda.is_bf16_supported()
+    
+    print(f"Hardware precision setting: {'bf16' if use_bf16 else 'fp16'}")
+    
+    # 2. Load tokenizer
+    # Check if we have trained the tokenizer locally first, otherwise load from HF hub
+    tokenizer_path = "./tokenizer_output"
+    if os.path.exists(tokenizer_path):
+        print(f"Loading local tokenizer from {tokenizer_path}")
+        tokenizer_name = tokenizer_path
+    else:
+        tokenizer_name = "Kush26/ember-tokenizer"
+        print(f"Local tokenizer not found, defaulting to HF Hub path: {tokenizer_name}")
+        
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    except Exception as e:
+        print(f"Error: Tokenizer '{tokenizer_name}' not found. Please train it first by running:")
+        print("  python tokenizer/train_tokenizer.py")
+        sys.exit(1)
+        
+    # 3. Model Architecture Config
+    print("Initializing model architecture...")
+    config = EmberConfig(
+        vocab_size=len(tokenizer),
+        hidden_size=1024,
+        num_hidden_layers=18,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        head_dim=64,
+        intermediate_size=2730,
+        max_position_embeddings=2048,
+        rms_norm_eps=1e-6,
+        tie_word_embeddings=True,
+    )
+    
+    model = EmberForCausalLM(config)
+    
+    # Enable gradient checkpointing to fit within 16GB T4 memory
+    model.gradient_checkpointing_enable()
+    print("✅ Gradient Checkpointing enabled.")
+    
+    # Print total parameter count
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total tied model parameters: {total_params:,} (~{total_params // 1_000_000}M)")
+
+    # 4. Stream packed and tokenized dataset
+    print("Loading mixed streaming pre-training dataset...")
+    try:
+        train_dataset = get_pretraining_mixture(
+            tokenizer_name=tokenizer_name,
+            max_seq_len=2048,
+            buffer_size=10000
+        )
+    except Exception as e:
+        print(f"Failed to stream dataset: {e}")
+        sys.exit(1)
+        
+    # Data collator for block-diagonal masking
+    data_collator = PackedDataCollator()
+
+    # 5. Define Training Arguments
+    # Note: ForgeTrainer will dynamically override per_device_train_batch_size,
+    # gradient_accumulation_steps, and max_steps according to the provider profile in forge.yaml.
+    training_args = TrainingArguments(
+        output_dir="./outputs",
+        per_device_train_batch_size=2,  # Placeholder, overridden by forge.yaml profile
+        gradient_accumulation_steps=128,  # Placeholder, overridden by forge.yaml profile
+        learning_rate=3e-4,
+        weight_decay=0.1,
+        max_steps=100000,               # Default max steps (overridden by active profile)
+        logging_steps=10,
+        save_steps=500,                 # Step interval for saving checkpoints & syncing to HF Hub
+        warmup_steps=2000,              # 2,000 steps warm-up
+        lr_scheduler_type="cosine",
+        adam_beta1=0.9,
+        adam_beta2=0.95,
+        fp16=not use_bf16,
+        bf16=use_bf16,
+        gradient_checkpointing=True,
+        ddp_find_unused_parameters=False,
+        report_to="none",
+        remove_unused_columns=False     # Important! We use custom keys (position_ids, document_ids)
+    )
+
+    # 6. Initialize the ForgeTrainer
+    # Automatically manages stateful resumption of streaming data, checkpoint syncing,
+    # and profile adjustments for Nomad Training (Modal A100 vs Kaggle DDP vs Colab T4)
+    print("Initializing ForgeTrainer...")
+    trainer = ForgeTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        data_collator=data_collator,
+        config_path="forge.yaml"
+    )
+
+    # 7. Start/Resume Training
+    print("Launching training...")
+    trainer.train()
+    print("Pre-training completed successfully!")
+
+if __name__ == "__main__":
+    main()
