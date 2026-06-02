@@ -1,5 +1,9 @@
 import os
 import sys
+import socket
+
+# Prevent network calls from hanging indefinitely by setting a 60s timeout
+socket.setdefaulttimeout(60.0)
 
 # DDP Rank Isolation for Cache and Datasets
 # Kaggle's dual-T4 runs in the same container. Separating HF_HOME prevents rank collisions
