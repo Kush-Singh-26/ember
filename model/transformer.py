@@ -301,18 +301,21 @@ class EmberModel(EmberPreTrainedModel):
 
         for layer in self.layers:
             if self.gradient_checkpointing and self.training:
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        return module(*inputs)
-                    return custom_forward
-                
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(layer),
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    use_reentrant=False,
-                )
+                if hasattr(self, "_gradient_checkpointing_func"):
+                    hidden_states = self._gradient_checkpointing_func(
+                        layer.__call__,
+                        hidden_states,
+                        attention_mask,
+                        position_ids,
+                    )
+                else:
+                    hidden_states = torch.utils.checkpoint.checkpoint(
+                        layer,
+                        hidden_states,
+                        attention_mask,
+                        position_ids,
+                        use_reentrant=True,
+                    )
             else:
                 hidden_states = layer(
                     hidden_states,
@@ -413,9 +416,8 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs
-        # Cast both to float32 BEFORE linear to prevent bf16 overflow in the
-        # 1024 x 65536 projection, while avoiding dtype mismatch during inference
-        logits = F.linear(hidden_states.float(), self.lm_head.weight.float())
+        # Compute logits in the native hidden states precision to save substantial memory
+        logits = self.lm_head(hidden_states)
 
         loss = None
         if labels is not None:
@@ -430,12 +432,13 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
             if num_items_in_batch is not None:
                 # For transformers >= 4.46 with gradient accumulation, trainer expects us
                 # to return the sum of losses divided by the total tokens across ALL micro-batches.
+                # Compute CrossEntropyLoss in float32 for numerical stability.
                 loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
-                loss = loss_fct(shift_logits, shift_labels)
+                loss = loss_fct(shift_logits.float(), shift_labels)
                 loss = loss / num_items_in_batch
             else:
                 loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction="mean")
-                loss = loss_fct(shift_logits, shift_labels)
+                loss = loss_fct(shift_logits.float(), shift_labels)
 
 
         if not return_dict:
