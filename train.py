@@ -1,5 +1,14 @@
 import os
 import sys
+
+# DDP Rank Isolation for Cache and Datasets
+# Kaggle's dual-T4 runs in the same container. Separating HF_HOME prevents rank collisions
+# and 'Bad file descriptor' network socket deadlock issues.
+_rank = os.environ.get("RANK", "0")
+os.environ["HF_HOME"] = f"/tmp/hf_cache_{_rank}"
+os.environ["HF_DATASETS_CACHE"] = f"/tmp/hf_cache_{_rank}/datasets"
+os.environ["FORGE_NO_SKIP"] = "1"  # Bypass the slow dataset skip operation over the network
+
 import logging
 import torch
 from transformers import TrainingArguments, AutoTokenizer
@@ -82,10 +91,23 @@ def main():
 
     # 4. Stream packed and tokenized dataset
     print("Loading mixed streaming pre-training dataset...")
+    
+    # Dynamic seed based on resumption status to ensure Rank 0 and Rank 1 receive
+    # a fresh permutation of training data without waiting hours to skip elements.
+    data_seed = 42
+    output_dir = "./outputs"
+    if os.path.exists(output_dir):
+        # Scan output_dir to see if checkpoint folders exist
+        checkpoints = [d for d in os.listdir(output_dir) if "checkpoint-" in d]
+        if checkpoints:
+            data_seed = 42 + len(checkpoints) * 1000
+            print(f"Resumption detected (cached checkpoints present). Shifting data shuffle seed to {data_seed}.")
+    
     train_dataset = get_pretraining_mixture(
         tokenizer_name=tokenizer_name,
         max_seq_len=2048,
-        buffer_size=10000
+        buffer_size=10000,
+        seed=data_seed,
     )
         
     # Data collator for block-diagonal masking
