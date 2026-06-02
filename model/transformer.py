@@ -282,8 +282,11 @@ class EmberModel(EmberPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-
+            
         hidden_states = inputs_embeds
+            
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(torch.bool)
 
         # Position IDs default
         if position_ids is None:
