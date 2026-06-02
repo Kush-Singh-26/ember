@@ -9,6 +9,11 @@ os.environ["HF_HOME"] = f"/tmp/hf_cache_{_rank}"
 os.environ["HF_DATASETS_CACHE"] = f"/tmp/hf_cache_{_rank}/datasets"
 os.environ["FORGE_NO_SKIP"] = "1"  # Bypass the slow dataset skip operation over the network
 
+# Force DDP to communicate over local loopback interface to prevent routing deadlocks
+os.environ["NCCL_SOCKET_IFNAME"] = "lo"
+os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+
+
 import logging
 import torch
 from transformers import TrainingArguments, AutoTokenizer
@@ -106,7 +111,7 @@ def main():
     train_dataset = get_pretraining_mixture(
         tokenizer_name=tokenizer_name,
         max_seq_len=2048,
-        buffer_size=10000,
+        buffer_size=1000,
         seed=data_seed,
     )
         
