@@ -37,10 +37,12 @@ profiles:
     gradient_accumulation_steps: 64  # 2 * 64 * 2 GPUs (DDP) = 256 seq = 524,288 tokens/step
     learning_rate: 3e-4
     max_steps: 60000
-    probe_memory: true
+    probe_memory: false               # Disabled: prober runs fp32 single-process, wrong for DDP fp16
     data_cache: false
     fp16: true
     ddp_find_unused_parameters: false
+    save_steps: 200                   # Avoids 50% Hub upload overhead at ~20s/step on T4
+
 
   colab:
     per_device_train_batch_size: 2

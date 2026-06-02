@@ -230,8 +230,14 @@ class EmberPreTrainedModel(PreTrainedModel):
         residual_std = std / math.sqrt(2 * self.config.num_hidden_layers)
         
         if isinstance(module, nn.Linear):
-            # Apply scaled init to the layers that project INTO the residual stream
             name = getattr(module, '_forge_name', '')
+            # lm_head.weight is tied to embed_tokens.weight — they share the exact
+            # same memory. Re-initializing lm_head here would silently overwrite the
+            # loaded embed_tokens weights with random noise, corrupting the model.
+            # Skip it entirely; tie_weights() will wire the reference correctly.
+            if name == 'lm_head':
+                return
+            # Apply scaled init to the layers that project INTO the residual stream
             if name in ('o_proj', 'down_proj'):
                 module.weight.data.normal_(mean=0.0, std=residual_std)
             else:
@@ -325,9 +331,46 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         self.model = EmberModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head._forge_name = 'lm_head'  # Skip re-init in _init_weights (tied weight)
 
         # Initialize weights and apply final processing
         self.post_init()
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        """
+        Override from_pretrained to explicitly inject lm_head.weight into the
+        checkpoint state dict before HF processes it.
+
+        Background: HF 5.x has a race condition in its tied-weight materialization
+        flow. When lm_head.weight is missing from the safetensors file (it is saved
+        as a tied weight = not saved), HF marks it as initialized via a flag on the
+        meta-device tensor. But when embed_tokens.weight is materialized from the
+        checkpoint, a NEW tensor object is created, losing the flag. HF then
+        re-initializes the OLD lm_head tensor with random noise (std=0.02), which
+        overwrites embed_tokens.weight through the shared memory reference —
+        silently corrupting the entire model.
+
+        Fix: disable re-initialization of missing keys for this model since all
+        missing keys (lm_head.weight) are tied and will be wired by tie_weights().
+        """
+        return super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+
+    def _initialize_missing_keys(self, is_quantized: bool = False) -> None:
+        """
+        Override to skip re-initialization of missing keys.
+
+        In HF 5.x, after loading the checkpoint, this method is called for any
+        parameter that was not found in the checkpoint. For EmberForCausalLM, the
+        only missing key is `lm_head.weight`, which is intentionally absent because
+        it is tied to `model.embed_tokens.weight`. Re-initializing it here would
+        silently overwrite the correctly-loaded embed_tokens weights with random
+        noise (std=0.02) through the shared memory reference.
+
+        The subsequent `tie_weights()` call correctly wires lm_head.weight to
+        embed_tokens.weight, so no initialization is needed here.
+        """
+        pass  # Intentional no-op: tied weights are wired by tie_weights(), not re-initialized
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens

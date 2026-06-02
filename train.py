@@ -23,10 +23,17 @@ def main():
     
     # Dynamic bf16 support check (A100 supports bf16, T4 only supports fp16)
     use_bf16 = False
+    use_compile = False  # torch_compile: big speedup on A100+, marginal/slow on T4
     if torch.cuda.is_available():
         use_bf16 = torch.cuda.is_bf16_supported()
+        # torch.compile requires compute capability >= 8.0 (A100+) to be worthwhile.
+        # On T4 (compute 7.5): first compile takes 5-10 minutes per GPU, and many
+        # Triton kernels fall back to eager mode. Not worth it for Kaggle T4 runs.
+        compute_cap = torch.cuda.get_device_properties(0).major
+        use_compile = (compute_cap >= 8)
     
     print(f"Hardware precision setting: {'bf16' if use_bf16 else 'fp16'}")
+    print(f"torch_compile: {'enabled (compute >= 8.0)' if use_compile else 'disabled (compute < 8.0, e.g. T4)'}")
     
     # 2. Load tokenizer
     # Check if we have trained the tokenizer locally first, otherwise load from HF hub
@@ -95,20 +102,21 @@ def main():
         weight_decay=0.1,
         max_steps=100000,               # Default max steps (overridden by active profile)
         logging_steps=10,
-        save_steps=50,                 # Step interval for saving checkpoints & syncing to HF Hub
+        save_steps=50,                  # Default; kaggle profile overrides to 200
         warmup_steps=2000,              # 2,000 steps warm-up
         lr_scheduler_type="cosine",
         adam_beta1=0.9,
         adam_beta2=0.95,
         fp16=not use_bf16,
         bf16=use_bf16,
-        gradient_checkpointing=False, # Dynamically handled above by model.gradient_checkpointing_enable()
-        torch_compile=True,             # Huge speedup by fusing kernels
+        gradient_checkpointing=False,   # Dynamically handled above by model.gradient_checkpointing_enable()
+        torch_compile=use_compile,      # A100+ only: slow compile + limited Triton on T4 (compute 7.5)
         ddp_find_unused_parameters=False,
         report_to="none",
-        remove_unused_columns=False,    # Important! We use custom keys (position_ids, document_ids)
-        dataloader_num_workers=4,
-        dataloader_prefetch_factor=2
+        remove_unused_columns=False,    # Important! We use custom keys (position_ids)
+        dataloader_num_workers=2,       # 2 workers per GPU (4 total in DDP). More risks rate-limits
+                                        # on HF Hub streaming and fork() deadlocks with IterableDataset.
+        dataloader_prefetch_factor=2,
     )
 
     # 6. Initialize the ForgeTrainer
