@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from model.config import EmberConfig
@@ -59,11 +59,12 @@ class EmberRotaryEmbedding(nn.Module):
         if position_ids is None:
             seq_len = x.shape[2]
             position_ids = torch.arange(seq_len, dtype=torch.long, device=x.device).unsqueeze(0)
-            
-        max_pos = position_ids.max().item() + 1
-        if max_pos > self.max_seq_len_cached:
-            self._set_cos_sin_cache(max_len=int(max_pos), device=x.device, dtype=x.dtype)
-            
+
+        # Safety clamp: position_ids must stay within the pre-computed cache range.
+        # SequencePacker already guarantees this, but clamp is torch.compile-friendly
+        # (no .item() call) and protects against any edge-case overflow.
+        position_ids = position_ids.clamp(max=self.max_seq_len_cached - 1)
+
         cos = self.cos_cached[position_ids]  # [batch, seq_len, dim]
         sin = self.sin_cached[position_ids]  # [batch, seq_len, dim]
         
@@ -107,6 +108,7 @@ class EmberAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.use_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.use_bias)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.use_bias)
+        self.o_proj._forge_name = 'o_proj'
         
         self.rotary_emb = EmberRotaryEmbedding(
             dim=self.head_dim,
@@ -174,6 +176,7 @@ class EmberMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.use_bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.use_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.use_bias)
+        self.down_proj._forge_name = 'down_proj'
         self.act_fn = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -219,9 +222,20 @@ class EmberPreTrainedModel(PreTrainedModel):
     _no_split_modules = ["EmberDecoderLayer"]
 
     def _init_weights(self, module):
-        std = 0.02
+        std = getattr(self.config, "initializer_range", 0.02)
+        # GPT-2 scaled init: residual projections that write into the residual stream
+        # (o_proj in attention, down_proj in MLP) use reduced std to prevent
+        # variance from compounding over N layers. Without this, hidden state
+        # RMS grows to ~100 over 18 layers, causing initial loss ~295 instead of ~11.
+        residual_std = std / math.sqrt(2 * self.config.num_hidden_layers)
+        
         if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
+            # Apply scaled init to the layers that project INTO the residual stream
+            name = getattr(module, '_forge_name', '')
+            if name in ('o_proj', 'down_proj'):
+                module.weight.data.normal_(mean=0.0, std=residual_std)
+            else:
+                module.weight.data.normal_(mean=0.0, std=std)
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
@@ -300,7 +314,7 @@ class EmberModel(EmberPreTrainedModel):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-class EmberForCausalLM(EmberPreTrainedModel):
+class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config: EmberConfig):
@@ -342,7 +356,7 @@ class EmberForCausalLM(EmberPreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else getattr(self.config, "return_dict", True)
 
         outputs = self.model(
             input_ids=input_ids,
@@ -353,19 +367,30 @@ class EmberForCausalLM(EmberPreTrainedModel):
         )
 
         hidden_states = outputs
-        logits = self.lm_head(hidden_states)
-        logits = logits.float()
+        # Cast to float32 BEFORE lm_head to prevent bf16 overflow in the
+        # 1024 x 65536 projection (bf16 max ~65504, large matmul can overflow)
+        logits = self.lm_head(hidden_states.float())
 
         loss = None
         if labels is not None:
+            num_items_in_batch = kwargs.pop("num_items_in_batch", None)
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = nn.CrossEntropyLoss()
+            
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
             shift_labels = shift_labels.view(-1)
-            loss = loss_fct(shift_logits, shift_labels)
+            
+            if num_items_in_batch is not None:
+                # For transformers >= 4.46 with gradient accumulation, trainer expects us
+                # to return the sum of losses divided by the total tokens across ALL micro-batches.
+                loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction="sum")
+                loss = loss_fct(shift_logits, shift_labels)
+                loss = loss / num_items_in_batch
+            else:
+                loss_fct = nn.CrossEntropyLoss(ignore_index=-100, reduction="mean")
+                loss = loss_fct(shift_logits, shift_labels)
+
 
         if not return_dict:
             output = (logits,) + (outputs,)

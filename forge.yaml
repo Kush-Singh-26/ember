@@ -3,7 +3,7 @@ state:
   repo_id: "Kush26/ember-checkpoints"
   branch: "checkpoints"
   checkpoint_limit: 2
-  push_every: 500
+  push_every: 50
   token_env: "HF_TOKEN"
   private: true
 

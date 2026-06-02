@@ -1,0 +1,14 @@
+{
+  "add_prefix_space": false,
+  "backend": "tokenizers",
+  "bos_token": "<s>",
+  "eos_token": "</s>",
+  "extra_special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>"
+  ],
+  "model_max_length": 2048,
+  "pad_token": "<pad>",
+  "tokenizer_class": "TokenizersBackend",
+  "unk_token": "<unk>"
+}

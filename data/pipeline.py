@@ -2,10 +2,11 @@ import os
 import argparse
 from typing import Dict, Iterator, List, Optional, Union
 import torch
+from torch.utils.data import IterableDataset as TorchIterableDataset
 from datasets import load_dataset, interleave_datasets, IterableDataset
 from transformers import AutoTokenizer
 
-class SequencePacker:
+class SequencePacker(TorchIterableDataset):
     """
     Packs variable-length tokenized sequences into fixed-length chunks (default 2048),
     and creates custom position_ids (resetting at document boundaries) and relative
@@ -28,15 +29,22 @@ class SequencePacker:
     def __iter__(self) -> Iterator[Dict[str, List[int]]]:
         buffer_input_ids = []
         buffer_position_ids = []
-        buffer_document_ids = []
         
-        current_doc_id = 0
-        
-        for item in self.dataset:
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            import itertools
+            iterator = itertools.islice(self.dataset, worker_info.id, None, worker_info.num_workers)
+        else:
+            iterator = self.dataset
+            
+        for item in iterator:
             # item contains tokenized "input_ids"
             input_ids = item.get("input_ids", [])
             if not input_ids:
                 continue
+            
+            # Truncate to leave room for BOS + EOS so position_ids stay in [0, max_seq_len-1]
+            input_ids = input_ids[:self.max_seq_len - 2]
                 
             # Pack doc with BOS and EOS tags
             doc_tokens = [self.bos_token_id] + list(input_ids) + [self.eos_token_id]
@@ -44,33 +52,21 @@ class SequencePacker:
             
             # Position IDs restart from 0 for each document
             doc_pos = list(range(doc_len))
-            # Document IDs track boundaries
-            doc_ids = [current_doc_id] * doc_len
-            current_doc_id += 1
             
             buffer_input_ids.extend(doc_tokens)
             buffer_position_ids.extend(doc_pos)
-            buffer_document_ids.extend(doc_ids)
             
             # Yield full chunks
             while len(buffer_input_ids) >= self.max_seq_len:
                 chunk_input_ids = buffer_input_ids[:self.max_seq_len]
                 chunk_position_ids = buffer_position_ids[:self.max_seq_len]
-                chunk_document_ids = buffer_document_ids[:self.max_seq_len]
                 
                 buffer_input_ids = buffer_input_ids[self.max_seq_len:]
                 buffer_position_ids = buffer_position_ids[self.max_seq_len:]
-                buffer_document_ids = buffer_document_ids[self.max_seq_len:]
-                
-                # Normalize document IDs to be 0-indexed relative to this chunk
-                unique_ids = list(dict.fromkeys(chunk_document_ids))
-                id_map = {old_id: new_id for new_id, old_id in enumerate(unique_ids)}
-                rel_document_ids = [id_map[old_id] for old_id in chunk_document_ids]
                 
                 yield {
                     "input_ids": chunk_input_ids,
                     "position_ids": chunk_position_ids,
-                    "document_ids": rel_document_ids,
                 }
 
 def get_pretraining_mixture(
@@ -92,10 +88,10 @@ def get_pretraining_mixture(
     
     # 1. WikiText-103 (English)
     try:
-        en_ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
+        en_ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train", streaming=False)
         def tokenize_en(x):
             return tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False)
-        en_ds = en_ds.map(tokenize_en, batched=True, remove_columns=["text"])
+        en_ds = en_ds.map(tokenize_en, batched=True, remove_columns=list(en_ds.column_names))
         sources.append(en_ds)
         weights.append(0.60)
         print("✅ Added English WikiText source (60% weight)")
@@ -104,10 +100,10 @@ def get_pretraining_mixture(
 
     # 2. Hindi Wikipedia
     try:
-        hi_ds = load_dataset("wikipedia", "20220301.hi", split="train", streaming=True)
+        hi_ds = load_dataset("wikimedia/wikipedia", "20231101.hi", split="train", streaming=False)
         def tokenize_hi(x):
             return tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False)
-        hi_ds = hi_ds.map(tokenize_hi, batched=True, remove_columns=["text", "title", "url"])
+        hi_ds = hi_ds.map(tokenize_hi, batched=True, remove_columns=list(hi_ds.column_names))
         sources.append(hi_ds)
         weights.append(0.20)
         print("✅ Added Hindi Wikipedia source (20% weight)")
@@ -116,10 +112,10 @@ def get_pretraining_mixture(
 
     # 3. Python CodeSearchNet
     try:
-        code_ds = load_dataset("code_search_net", "python", split="train", streaming=True)
+        code_ds = load_dataset("code-search-net/code_search_net", "python", split="train", streaming=False)
         def tokenize_code(x):
-            text = x.get("whole_funcstring", "") or x.get("code", "")
-            return tokenizer(text, truncation=True, max_length=max_seq_len, add_special_tokens=False)
+            text_list = x.get("whole_func_string") or x.get("func_code_string") or []
+            return tokenizer(text_list, truncation=True, max_length=max_seq_len, add_special_tokens=False)
         code_ds = code_ds.map(tokenize_code, batched=True, remove_columns=code_ds.column_names)
         sources.append(code_ds)
         weights.append(0.20)
@@ -144,15 +140,15 @@ def get_pretraining_mixture(
     )
     
     # Shuffle buffer to ensure mixture blending
-    mixed_dataset = mixed_dataset.shuffle(buffer_size=buffer_size, seed=seed)
+    mixed_dataset = mixed_dataset.shuffle(seed=seed)
     
     # Pack sequences
     packed_dataset = SequencePacker(
         dataset=mixed_dataset,
         max_seq_len=max_seq_len,
-        bos_token_id=tokenizer.bos_token_id or 1,
-        eos_token_id=tokenizer.eos_token_id or 2,
-        pad_token_id=tokenizer.pad_token_id or 3,
+        bos_token_id=tokenizer.bos_token_id if tokenizer.bos_token_id is not None else 1,
+        eos_token_id=tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 2,
+        pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 3,
     )
     
     return packed_dataset
@@ -165,27 +161,17 @@ class PackedDataCollator:
         
         input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         position_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
-        document_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         
         for idx, feature in enumerate(features):
             input_ids[idx] = torch.tensor(feature["input_ids"], dtype=torch.long)
             position_ids[idx] = torch.tensor(feature["position_ids"], dtype=torch.long)
-            document_ids[idx] = torch.tensor(feature["document_ids"], dtype=torch.long)
             
-        # Dynamically build 4D boolean attention mask to prevent cross-document leakage
-        # Shape: (batch_size, 1, seq_len, seq_len)
-        # Element is True if within the same document AND j <= i (causal)
-        doc_ids_unsqueezed = document_ids.unsqueeze(1)  # [B, 1, S]
-        same_doc = (doc_ids_unsqueezed.unsqueeze(-1) == doc_ids_unsqueezed.unsqueeze(-2))  # [B, 1, S, S]
-        
-        causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))  # [S, S]
-        attention_mask = same_doc & causal.unsqueeze(0).unsqueeze(1)  # [B, 1, S, S]
-        
         return {
             "input_ids": input_ids,
-            "attention_mask": attention_mask,
             "position_ids": position_ids,
             "labels": input_ids.clone()  # Next-token prediction labels (shifted inside model)
+            # Note: document_ids are NOT passed to the model forward() — they were only used
+            # for the (now-removed) block-diagonal mask construction.
         }
 
 if __name__ == "__main__":
@@ -208,18 +194,8 @@ if __name__ == "__main__":
         print("\nCollated Batch Verification:")
         print(f"input_ids shape: {batch['input_ids'].shape}")
         print(f"position_ids shape: {batch['position_ids'].shape}")
-        print(f"attention_mask shape: {batch['attention_mask'].shape}")
         print(f"labels shape: {batch['labels'].shape}")
         
-        # Verify block diagonal masking
-        print("\nChecking mask properties for sequence 0:")
-        mask_0 = batch["attention_mask"][0, 0]
-        # Diagonal elements must be True (a token can attend to itself)
-        assert torch.all(torch.diagonal(mask_0)), "Diagonal elements must all be True"
-        # Upper triangle must be False (causal check)
-        upper_tril = torch.triu(mask_0, diagonal=1)
-        assert not torch.any(upper_tril), "Upper triangle must be completely False (causal violation)"
-        print("✅ Attention mask causal & block-diagonal properties verified!")
         print("✅ Data pipeline built successfully!")
         
     except Exception as e:

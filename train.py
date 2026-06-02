@@ -1,8 +1,12 @@
 import os
 import sys
+import logging
 import torch
 from transformers import TrainingArguments, AutoTokenizer
 from forge import ForgeTrainer
+
+# Suppress harmless torch.distributed kernel version warning
+logging.getLogger("torch.distributed").setLevel(logging.ERROR)
 
 # Ensure current directory is in system path for importing model and data packages
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -58,9 +62,12 @@ def main():
     
     model = EmberForCausalLM(config)
     
-    # Enable gradient checkpointing to fit within 16GB T4 memory
-    model.gradient_checkpointing_enable()
-    print("✅ Gradient Checkpointing enabled.")
+    # Enable gradient checkpointing to fit within 16GB T4 memory, but disable on A100 for speed
+    if torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 20 * 1024**3:
+        model.gradient_checkpointing_enable()
+        print("✅ Gradient Checkpointing enabled (Limited Memory).")
+    else:
+        print("✅ Gradient Checkpointing disabled (Abundant Memory, High Speed).")
     
     # Print total parameter count
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -68,15 +75,11 @@ def main():
 
     # 4. Stream packed and tokenized dataset
     print("Loading mixed streaming pre-training dataset...")
-    try:
-        train_dataset = get_pretraining_mixture(
-            tokenizer_name=tokenizer_name,
-            max_seq_len=2048,
-            buffer_size=10000
-        )
-    except Exception as e:
-        print(f"Failed to stream dataset: {e}")
-        sys.exit(1)
+    train_dataset = get_pretraining_mixture(
+        tokenizer_name=tokenizer_name,
+        max_seq_len=2048,
+        buffer_size=10000
+    )
         
     # Data collator for block-diagonal masking
     data_collator = PackedDataCollator()
@@ -92,17 +95,20 @@ def main():
         weight_decay=0.1,
         max_steps=100000,               # Default max steps (overridden by active profile)
         logging_steps=10,
-        save_steps=500,                 # Step interval for saving checkpoints & syncing to HF Hub
+        save_steps=50,                 # Step interval for saving checkpoints & syncing to HF Hub
         warmup_steps=2000,              # 2,000 steps warm-up
         lr_scheduler_type="cosine",
         adam_beta1=0.9,
         adam_beta2=0.95,
         fp16=not use_bf16,
         bf16=use_bf16,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False, # Dynamically handled above by model.gradient_checkpointing_enable()
+        torch_compile=True,             # Huge speedup by fusing kernels
         ddp_find_unused_parameters=False,
         report_to="none",
-        remove_unused_columns=False     # Important! We use custom keys (position_ids, document_ids)
+        remove_unused_columns=False,    # Important! We use custom keys (position_ids, document_ids)
+        dataloader_num_workers=4,
+        dataloader_prefetch_factor=2
     )
 
     # 6. Initialize the ForgeTrainer

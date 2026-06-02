@@ -15,7 +15,7 @@ def get_training_corpus(sample_limit: int = 30000) -> Iterator[str]:
     
     # 1. English text (WikiText-103)
     try:
-        en_ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
+        en_ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split="train", streaming=True)
         en_iter = iter(en_ds)
     except Exception as e:
         print(f"Warning: Failed to load WikiText: {e}")
@@ -23,7 +23,7 @@ def get_training_corpus(sample_limit: int = 30000) -> Iterator[str]:
 
     # 2. Hindi text (portion of cc100 or wikipedia hi)
     try:
-        hi_ds = load_dataset("wikipedia", "20220301.hi", split="train", streaming=True)
+        hi_ds = load_dataset("wikimedia/wikipedia", "20231101.hi", split="train", streaming=True)
         hi_iter = iter(hi_ds)
     except Exception as e:
         print(f"Warning: Failed to load Hindi Wikipedia: {e}")
@@ -31,7 +31,7 @@ def get_training_corpus(sample_limit: int = 30000) -> Iterator[str]:
 
     # 3. Code (python, javascript, etc. from code_search_net)
     try:
-        code_ds = load_dataset("code_search_net", "python", split="train", streaming=True)
+        code_ds = load_dataset("code-search-net/code_search_net", "python", split="train", streaming=True)
         code_iter = iter(code_ds)
     except Exception as e:
         print(f"Warning: Failed to load CodeSearchNet: {e}")
@@ -63,7 +63,7 @@ def get_training_corpus(sample_limit: int = 30000) -> Iterator[str]:
         # Code
         try:
             item = next(code_iter)
-            text = item.get("whole_funcstring", "").strip() or item.get("code", "").strip()
+            text = item.get("whole_func_string", "").strip() or item.get("func_code_string", "").strip()
             if len(text) > 30:
                 yield text
                 count += 1
@@ -101,6 +101,7 @@ def train_bpe_tokenizer(vocab_size: int = 65536, sample_limit: int = 30000, push
         eos_token="</s>",
         pad_token="<pad>",
         add_prefix_space=False,
+        model_max_length=2048,
     )
     
     # Ensure correct special token mappings

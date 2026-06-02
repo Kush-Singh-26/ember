@@ -1,0 +1,12 @@
+[project]
+name = "ember"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "lm-forge",
+]
+
+[tool.uv.sources]
+lm-forge = { path = "../lm_forge", editable = true }
