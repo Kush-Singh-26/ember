@@ -30,6 +30,12 @@ class SequencePacker(TorchIterableDataset):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id
+        
+        # Safely retrieve Rank and World Size from environment variables.
+        # This prevents calling dist.get_rank() inside forked DataLoader workers
+        # which triggers silent NCCL deadlocks.
+        self.rank = int(os.environ.get("RANK", "0"))
+        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     def __iter__(self) -> Iterator[Dict[str, List[int]]]:
         buffer_input_ids = []
@@ -39,8 +45,8 @@ class SequencePacker(TorchIterableDataset):
 
         # --- Sharding: each (DDP rank, dataloader worker) pair gets a unique slice ---
         # Without this in DDP, both GPUs stream the same data, halving effective throughput.
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        rank = self.rank
+        world_size = self.world_size
 
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
