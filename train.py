@@ -163,6 +163,10 @@ def main():
         ddp_find_unused_parameters=False,
         report_to="none",
         remove_unused_columns=False,    # Important! We use custom keys (position_ids)
+        ignore_data_skip=True,          # CRITICAL for streaming datasets: prevents HF Trainer from
+                                        # trying to fast-forward 233,600+ batches through the network
+                                        # stream on resume. Our shifted data_seed already ensures
+                                        # fresh data on each resumption.
         dataloader_num_workers=0,       # 0 workers per GPU runs data loading in the main process thread.
                                         # This completely eliminates PyTorch multiprocessing deadlocks
                                         # when a streamed dataset (like Hindi Wikipedia) has fewer shards
