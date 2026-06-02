@@ -367,9 +367,9 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs
-        # Cast to float32 BEFORE lm_head to prevent bf16 overflow in the
-        # 1024 x 65536 projection (bf16 max ~65504, large matmul can overflow)
-        logits = self.lm_head(hidden_states.float())
+        # Cast both to float32 BEFORE linear to prevent bf16 overflow in the
+        # 1024 x 65536 projection, while avoiding dtype mismatch during inference
+        logits = F.linear(hidden_states.float(), self.lm_head.weight.float())
 
         loss = None
         if labels is not None:
