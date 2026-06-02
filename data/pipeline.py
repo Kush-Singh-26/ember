@@ -164,33 +164,32 @@ def get_pretraining_mixture(
     except Exception as e:
         print(f"⚠️  English (c4) source failed: {e}")
 
-    # ── 2. Hindi: Wikipedia (Downloaded locally, then streamed) ──────────────
+    # ── 2. Hindi: Wikipedia (streaming) ──────────────────────────────────────
     try:
         hi_ds = load_dataset(
             "wikimedia/wikipedia",
             "20231101.hi",
             split="train",
-            streaming=False,
+            streaming=True,
         )
         hi_ds = hi_ds.map(
             lambda x: tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False),
             batched=True,
             remove_columns=["id", "url", "title", "text"],
         )
-        hi_ds = hi_ds.to_iterable_dataset()
         sources.append(hi_ds)
         weights.append(0.20)
-        print("✅ Added Hindi source: wikimedia/wikipedia 20231101.hi (20% weight, cached locally)")
+        print("✅ Added Hindi source: wikimedia/wikipedia 20231101.hi (20% weight, streaming from local cache)")
     except Exception as e:
         print(f"⚠️  Hindi source failed: {e}")
 
-    # ── 3. Code: CodeSearchNet Python (Downloaded locally, then streamed) ─────
+    # ── 3. Code: CodeSearchNet Python (streaming) ─────────────────────────────
     try:
         code_ds = load_dataset(
             "code-search-net/code_search_net",
             "python",
             split="train",
-            streaming=False,
+            streaming=True,
         )
         def _tokenize_code(batch):
             # Prefer whole_func_string (full function with docstring), fallback to func_code_string
@@ -201,10 +200,9 @@ def get_pretraining_mixture(
             batched=True,
             remove_columns=list(code_ds.column_names),
         )
-        code_ds = code_ds.to_iterable_dataset()
         sources.append(code_ds)
         weights.append(0.20)
-        print("✅ Added Code source: code-search-net/code_search_net python (20% weight, cached locally)")
+        print("✅ Added Code source: code-search-net/code_search_net python (20% weight, streaming from local cache)")
     except Exception as e:
         print(f"⚠️  Code source failed: {e}")
 

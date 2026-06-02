@@ -5,17 +5,34 @@ import socket
 # Prevent network calls from hanging indefinitely by setting a 60s timeout
 socket.setdefaulttimeout(60.0)
 
-# DDP Rank Isolation for Cache and Datasets
-# Kaggle's dual-T4 runs in the same container. Separating HF_HOME prevents rank collisions
-# and 'Bad file descriptor' network socket deadlock issues.
-_rank = os.environ.get("RANK", "0")
-os.environ["HF_HOME"] = f"/tmp/hf_cache_{_rank}"
-os.environ["HF_DATASETS_CACHE"] = f"/tmp/hf_cache_{_rank}/datasets"
+# Use a shared cache directory for raw files to allow both ranks to read locally
+os.environ["HF_HOME"] = "/tmp/hf_shared_cache"
+os.environ["HF_DATASETS_CACHE"] = "/tmp/hf_shared_cache/datasets"
 os.environ["FORGE_NO_SKIP"] = "1"  # Bypass the slow dataset skip operation over the network
 
 # Force DDP to communicate over local loopback interface to prevent routing deadlocks
 os.environ["NCCL_SOCKET_IFNAME"] = "lo"
 os.environ["GLOO_SOCKET_IFNAME"] = "lo"
+
+# Pre-download Wikipedia and CodeSearchNet raw files on Rank 0 at startup
+import time
+_rank = os.environ.get("RANK", "0")
+lock_file = "/tmp/dataset_download_complete.lock"
+if _rank == "0":
+    if not os.path.exists(lock_file):
+        print("=== [Forge] Rank 0: Pre-downloading Wikipedia & CodeSearchNet raw files to cache... ===")
+        from datasets import load_dataset
+        # Download raw files (no tokenization/mapping)
+        load_dataset("wikimedia/wikipedia", "20231101.hi", split="train")
+        load_dataset("code-search-net/code_search_net", "python", split="train")
+        with open(lock_file, "w") as f:
+            f.write("complete")
+        print("=== [Forge] Rank 0: Pre-download complete! ===")
+else:
+    print(f"=== [Forge] Rank {_rank}: Waiting for Rank 0 to complete pre-download... ===")
+    while not os.path.exists(lock_file):
+        time.sleep(1)
+
 
 
 import logging
