@@ -114,9 +114,10 @@ def main():
         ddp_find_unused_parameters=False,
         report_to="none",
         remove_unused_columns=False,    # Important! We use custom keys (position_ids)
-        dataloader_num_workers=2,       # 2 workers per GPU (4 total in DDP). More risks rate-limits
-                                        # on HF Hub streaming and fork() deadlocks with IterableDataset.
-        dataloader_prefetch_factor=2,
+        dataloader_num_workers=0,       # 0 workers per GPU runs data loading in the main process thread.
+                                        # This completely eliminates PyTorch multiprocessing deadlocks
+                                        # when a streamed dataset (like Hindi Wikipedia) has fewer shards
+                                        # than workers (num_shards=1 vs num_workers=2).
     )
 
     # 6. Initialize the ForgeTrainer
