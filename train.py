@@ -5,8 +5,10 @@ import socket
 # Prevent network calls from hanging indefinitely by setting a 60s timeout
 socket.setdefaulttimeout(60.0)
 
-# Use a shared cache directory for raw files to allow both ranks to read locally
-os.environ["HF_HOME"] = "/tmp/hf_shared_cache"
+# Use separate HF_HOME per rank to prevent DDP lock deadlocks during checkpoint downloads,
+# but share the datasets cache folder to avoid duplicate downloads of Wikipedia & CodeSearchNet.
+_rank = os.environ.get("RANK", "0")
+os.environ["HF_HOME"] = f"/tmp/hf_cache_{_rank}"
 os.environ["HF_DATASETS_CACHE"] = "/tmp/hf_shared_cache/datasets"
 os.environ["FORGE_NO_SKIP"] = "1"  # Bypass the slow dataset skip operation over the network
 
@@ -16,7 +18,6 @@ os.environ["GLOO_SOCKET_IFNAME"] = "lo"
 
 # Pre-download Wikipedia and CodeSearchNet raw files on Rank 0 at startup
 import time
-_rank = os.environ.get("RANK", "0")
 lock_file = "/tmp/dataset_download_complete.lock"
 if _rank == "0":
     if not os.path.exists(lock_file):
