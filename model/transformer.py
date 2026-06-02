@@ -407,7 +407,9 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         self, input_ids: torch.LongTensor, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
     ) -> dict:
         model_inputs = {"input_ids": input_ids}
-        if attention_mask is not None:
+        # If attention mask is all 1s (no padding), we don't need it. 
+        # Removing it allows SDPA to use fast `is_causal=True` mode without crashing.
+        if attention_mask is not None and not attention_mask.all():
             model_inputs["attention_mask"] = attention_mask
         if kwargs.get("position_ids", None) is not None:
             model_inputs["position_ids"] = kwargs["position_ids"]

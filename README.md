@@ -1,10 +1,10 @@
-# Ember-275M 🦅
+# Ember-275M
 
 A high-performance, parameter-efficient decoder-only language model engineered from scratch using the **lm_forge** Nomad Training framework. Designed to pre-train seamlessly across diverse and heterogeneous GPU resources (Modal A100, Kaggle 2×T4, Colab T4) while preserving strict training step consistency.
 
 ---
 
-## 🏗️ Architecture & Model Specification
+## Architecture & Model Specification
 
 Ember utilizes state-of-the-art transformer architecture design choices derived from modern Llama-3 and Gemma conventions:
 
@@ -21,15 +21,16 @@ Ember utilizes state-of-the-art transformer architecture design choices derived 
 | **Context Length** | 2048 | Dynamic document boundary masking and causal packing |
 | **Bias Terms** | None | No linear layer biases (Llama style) |
 
-### 🧩 Document Boundary Masking & Packing
+### Document Boundary Masking & Packing
 
 Ember supports highly efficient **Sequence Packing** with **Document Boundary Masking** to eliminate cross-document attention leakage (where tokens in Document B attend to tokens in Document A).
+
 - **Position IDs Reset:** Position IDs reset to `0` at document boundaries.
 - **Attention Mask:** Custom 4D block-diagonal boolean mask ensures tokens only attend to other tokens belonging to the *same* document causal segment, even when packed within the same 2048-token sequence block.
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 ember/
@@ -57,7 +58,7 @@ ember/
 
 ---
 
-## 🚀 Step-by-Step Pre-training Guide
+## Step-by-Step Pre-training Guide
 
 ### 1. Installation
 
@@ -107,7 +108,7 @@ Checkpoints are automatically saved, verified, and uploaded to `Kush26/ember-che
 
 ---
 
-## 📊 Zero-Shot Evaluation
+## Zero-Shot Evaluation
 
 Benchmark the model zero-shot performance on HellaSwag (common-sense reasoning) and ARC-Easy (science QA) using our fast, lightweight likelihood-based evaluation harness:
 
@@ -117,7 +118,7 @@ python evaluation/benchmarks.py --model "./outputs/final" --samples 100
 
 ---
 
-## 🎯 Conversational Alignment: SFT & DPO
+## Conversational Alignment: SFT & DPO
 
 After pre-training, fine-tune the model to follow instructions and align with preferences using parameter-efficient fine-tuning (LoRA):
 
