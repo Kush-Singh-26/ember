@@ -53,6 +53,23 @@ if _rank == "0":
         load_dataset("wikimedia/wikipedia", "20231101.hi", split="train")
         load_dataset("code-search-net/code_search_net", "python", split="train")
         
+        # 3. Pre-download FineWeb-Edu Parquet shards to local disk
+        #    10 shards ≈ 21.5 GB, enough for ~10K steps at 524K tokens/step
+        import urllib.request
+        fineweb_dir = "/kaggle/working/fineweb-edu-parquet"
+        os.makedirs(fineweb_dir, exist_ok=True)
+        print(f"=== [Forge] Rank 0: Pre-downloading FineWeb-Edu (10 shards) to {fineweb_dir}... ===")
+        for i in range(10):
+            shard_name = f"{i//10:03d}_{i%10:05d}.parquet"
+            url = f"https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu/resolve/main/sample/100BT/{shard_name}"
+            dest = os.path.join(fineweb_dir, shard_name)
+            if not os.path.exists(dest):
+                print(f"  Downloading {shard_name}...")
+                urllib.request.urlretrieve(url, dest)
+            else:
+                print(f"  {shard_name} already exists, skipping.")
+        print(f"=== [Forge] Rank 0: FineWeb-Edu download complete! ===")
+        
         with open(lock_file, "w") as f:
             f.write("complete")
         print("=== [Forge] Rank 0: Pre-download complete! ===")

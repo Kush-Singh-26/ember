@@ -157,17 +157,29 @@ def get_pretraining_mixture(
     sources = []
     weights = []
 
-    # ── 1. English: FineWeb-Edu (1.3T tokens, Parquet, streaming from HF Hub) ─
+    # ── 1. English: FineWeb-Edu (Parquet, local or streaming) ───────────────
     # Higher quality than C4: educational content filtered by Llama3-70B classifier.
     # Outperforms C4 on MMLU, ARC, OpenBookQA benchmarks. Already in Parquet format.
+    # If local Parquet shards exist (pre-downloaded by train.py), read from disk
+    # to eliminate HF Hub network latency. Otherwise fall back to streaming.
+    fineweb_dir = os.environ.get("FORGE_DATA_DIR", "/kaggle/working/fineweb-edu-parquet")
     try:
-        print("Loading English FineWeb-Edu dataset (streaming from HF Hub)...")
-        en_ds = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name="sample-100BT",
-            split="train",
-            streaming=True,
-        )
+        if os.path.isdir(fineweb_dir) and os.listdir(fineweb_dir):
+            print(f"Loading FineWeb-Edu from local Parquet: {fineweb_dir}")
+            en_ds = load_dataset(
+                "parquet",
+                data_dir=fineweb_dir,
+                split="train",
+                streaming=True,
+            )
+        else:
+            print("Loading FineWeb-Edu from HF Hub (streaming)...")
+            en_ds = load_dataset(
+                "HuggingFaceFW/fineweb-edu",
+                name="sample-100BT",
+                split="train",
+                streaming=True,
+            )
         en_ds = en_ds.map(
             lambda x: tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False),
             batched=True,
