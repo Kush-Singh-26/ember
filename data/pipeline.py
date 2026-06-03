@@ -31,34 +31,16 @@ class SequencePacker(TorchIterableDataset):
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id
         
-        # Safely retrieve Rank and World Size from environment variables.
-        # This prevents calling dist.get_rank() inside forked DataLoader workers
-        # which triggers silent NCCL deadlocks.
-        self.rank = int(os.environ.get("RANK", "0"))
-        self.world_size = int(os.environ.get("WORLD_SIZE", "1"))
-
     def __iter__(self) -> Iterator[Dict[str, List[int]]]:
         buffer_input_ids = []
         buffer_position_ids = []
         buffer_document_ids = []
         doc_counter = 0
 
-        # --- Sharding: each (DDP rank, dataloader worker) pair gets a unique slice ---
-        # Without this in DDP, both GPUs stream the same data, halving effective throughput.
-        rank = self.rank
-        world_size = self.world_size
-
+        # --- Sharding: dataloader workers (worker_id-based) ---
         worker_info = torch.utils.data.get_worker_info()
-        if worker_info is not None:
-            # Combined shard: rank * n_workers + worker_id, step = world_size * n_workers
-            shard_id = rank * worker_info.num_workers + worker_info.id
-            total_shards = world_size * worker_info.num_workers
-        else:
-            shard_id = rank
-            total_shards = world_size
-
-        if total_shards > 1:
-            iterator = itertools.islice(self.dataset, shard_id, None, total_shards)
+        if worker_info is not None and worker_info.num_workers > 1:
+            iterator = itertools.islice(self.dataset, worker_info.id, None, worker_info.num_workers)
         else:
             iterator = iter(self.dataset)
 
@@ -110,6 +92,11 @@ class SequencePacker(TorchIterableDataset):
                     "position_ids": chunk_position_ids,
                     "document_ids": relative_doc_ids,
                 }
+
+def gen_sharded(dataset, num_shards, index):
+    for i, item in enumerate(dataset):
+        if i % num_shards == index:
+            yield item
 
 def get_pretraining_mixture(
     tokenizer_name: str,
@@ -212,6 +199,27 @@ def get_pretraining_mixture(
     # Normalize weights in case some sources failed to load
     total_w = sum(weights)
     normalized_weights = [w / total_w for w in weights]
+
+    # ── Rank Sharding ─────────────────────────────────────────────────────────
+    # Shard at the DDP Rank level first to avoid redundant downloads in multi-GPU training
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    
+    if world_size > 1:
+        sharded_sources = []
+        for src in sources:
+            try:
+                # Use HF's native server-side file-level sharding
+                sharded_sources.append(src.shard(num_shards=world_size, index=rank))
+            except Exception:
+                # Fallback to sample-level sharding (for single-file datasets like CodeSearchNet)
+                sharded = IterableDataset.from_generator(
+                    gen_sharded,
+                    gen_kwargs={"dataset": src, "num_shards": world_size, "index": rank},
+                    features=src.features
+                )
+                sharded_sources.append(sharded)
+        sources = sharded_sources
 
     # ── Interleave ────────────────────────────────────────────────────────────
     # stopping_strategy="all_exhausted": smaller datasets (code, hindi) cycle until
