@@ -119,51 +119,36 @@ class EmberAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
         bsz, q_len, _ = hidden_states.size()
-        
+
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
-        
+
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        
+
         cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        
+
         if self.num_key_value_groups > 1:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
-            
-        if attention_mask is not None:
-            # explicit block-diagonal or padding attention mask (boolean mask where True = keep, False = mask)
-            # PyTorch SDPA attn_mask can be float or boolean.
-            attn_output = F.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=attention_mask,
-                dropout_p=self.config.dropout if self.training else 0.0,
-                is_causal=False
-            )
-        else:
-            # standard causal self-attention
-            attn_output = F.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=None,
-                dropout_p=self.config.dropout if self.training else 0.0,
-                is_causal=True
-            )
-            
+
+        attn_output = F.scaled_dot_product_attention(
+            query_states,
+            key_states,
+            value_states,
+            dropout_p=self.config.dropout if self.training else 0.0,
+            is_causal=True,
+        )
+
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)
-        
+
         return self.o_proj(attn_output)
 
 class EmberMLP(nn.Module):
@@ -194,7 +179,6 @@ class EmberDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
     ) -> torch.Tensor:
         # Pre-Norm Attention
@@ -202,7 +186,6 @@ class EmberDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
-            attention_mask=attention_mask,
             position_ids=position_ids,
         )
         hidden_states = residual + hidden_states
@@ -272,7 +255,6 @@ class EmberModel(EmberPreTrainedModel):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         **kwargs,
@@ -288,13 +270,9 @@ class EmberModel(EmberPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-            
-        hidden_states = inputs_embeds
-            
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(torch.bool)
 
-        # Position IDs default
+        hidden_states = inputs_embeds
+
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             position_ids = torch.arange(seq_length, dtype=torch.long, device=device).unsqueeze(0).expand(batch_size, -1)
@@ -305,21 +283,18 @@ class EmberModel(EmberPreTrainedModel):
                     hidden_states = self._gradient_checkpointing_func(
                         layer.__call__,
                         hidden_states,
-                        attention_mask,
                         position_ids,
                     )
                 else:
                     hidden_states = torch.utils.checkpoint.checkpoint(
                         layer,
                         hidden_states,
-                        attention_mask,
                         position_ids,
                         use_reentrant=False,
                     )
             else:
                 hidden_states = layer(
                     hidden_states,
-                    attention_mask=attention_mask,
                     position_ids=position_ids,
                 )
 
@@ -396,7 +371,6 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -409,7 +383,6 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
 
         outputs = self.model(
             input_ids=input_ids,
-            attention_mask=attention_mask,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
             **kwargs,

@@ -3,7 +3,7 @@ import itertools
 import argparse
 import queue
 import threading
-from typing import Dict, Iterator, List, Optional, Union
+from typing import Dict, Iterator, List, Union
 import torch
 import torch.distributed as dist
 from torch.utils.data import IterableDataset as TorchIterableDataset
@@ -143,19 +143,13 @@ def get_pretraining_mixture(
     Loads, interleaves, tokenizes, and packs the pre-training data mixture.
 
     Data mixture (60% English / 20% Hindi / 20% Code):
-      - English: allenai/c4  (~365B tokens, streaming, effectively inexhaustible)
+      - English: FineWeb-Edu sample-100BT (~100B tokens, Parquet, streaming from HF Hub)
       - Hindi:   wikimedia/wikipedia Hindi (~400k articles, streaming)
       - Code:    code-search-net/code_search_net Python (~180k functions, streaming)
 
     All sources use streaming=True to avoid large disk downloads (critical for Kaggle
-    which has ~100GB disk). The c4 dataset alone is 350GB uncompressed, so streaming
-    is the only practical option.
-
-    Why c4 instead of WikiText-103:
-      WikiText-103 has only ~100M tokens. At 256 sequences/step × 2048 tokens and 60%
-      weight, you need ~18.9B English tokens for 60k steps. WikiText-103 would repeat
-      ~189 times, causing the model to memorize a tiny corpus rather than learn diverse
-      language patterns. c4 has 365B tokens — far more than needed even for 10× this run.
+    which has ~100GB disk). FineWeb-Edu is already in Parquet format on HF Hub,
+    so no local storage or conversion is needed.
     """
     print(f"Initializing data mixture with tokenizer: {tokenizer_name}")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -163,28 +157,27 @@ def get_pretraining_mixture(
     sources = []
     weights = []
 
-    # ── 1. English: allenai/c4 (365B tokens, streaming) ──────────────────────
-    # Replaces WikiText-103 which was only 100M tokens and was cycling 100+ times.
-    # c4 is the standard large-scale English pre-training corpus (used by T5, etc.).
+    # ── 1. English: FineWeb-Edu (1.3T tokens, Parquet, streaming from HF Hub) ─
+    # Higher quality than C4: educational content filtered by Llama3-70B classifier.
+    # Outperforms C4 on MMLU, ARC, OpenBookQA benchmarks. Already in Parquet format.
     try:
+        print("Loading English FineWeb-Edu dataset (streaming from HF Hub)...")
         en_ds = load_dataset(
-            "allenai/c4",
-            "en",
+            "HuggingFaceFW/fineweb-edu",
+            name="sample-100BT",
             split="train",
-            streaming=True,          # MUST be True — c4 is 350GB uncompressed
-            trust_remote_code=True,
+            streaming=True,
         )
-        # c4 text field is "text"
         en_ds = en_ds.map(
             lambda x: tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False),
             batched=True,
-            remove_columns=["text", "timestamp", "url"],
+            remove_columns=en_ds.column_names,
         )
         sources.append(en_ds)
         weights.append(0.60)
-        print("✅ Added English source: allenai/c4 (60% weight, ~365B tokens)")
+        print("✅ Added English source: FineWeb-Edu sample-100BT (60% weight)")
     except Exception as e:
-        print(f"⚠️  English (c4) source failed: {e}")
+        print(f"⚠️  English (FineWeb-Edu) source failed: {e}")
 
     # ── 2. Hindi: Wikipedia (streaming) ──────────────────────────────────────
     try:
@@ -258,8 +251,8 @@ def get_pretraining_mixture(
 
     # ── Interleave ────────────────────────────────────────────────────────────
     # stopping_strategy="all_exhausted": smaller datasets (code, hindi) cycle until
-    # the largest (c4) is exhausted. Since c4 is 365B tokens and we train for 60k
-    # steps (~30B tokens), c4 will never exhaust — the Trainer's max_steps stops us.
+    # the largest (FineWeb-Edu) is exhausted. Since FineWeb-Edu sample-100BT has ~100B tokens
+    # steps (~30B tokens), FineWeb-Edu will never exhaust — the Trainer's max_steps stops us.
     print(f"Interleaving datasets with weights: {[f'{w:.2f}' for w in normalized_weights]}")
     mixed_dataset = interleave_datasets(
         datasets=sources,
@@ -293,32 +286,16 @@ class PackedDataCollator:
 
         input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         position_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
-        
-        # Build block-diagonal attention mask if document_ids are present
-        has_doc_ids = "document_ids" in features[0]
-        if has_doc_ids:
-            attention_mask = torch.zeros(batch_size, 1, seq_len, seq_len, dtype=torch.bool)
-        else:
-            attention_mask = None
 
         for idx, feature in enumerate(features):
             input_ids[idx] = torch.tensor(feature["input_ids"], dtype=torch.long)
             position_ids[idx] = torch.tensor(feature["position_ids"], dtype=torch.long)
-            
-            if has_doc_ids:
-                doc_ids = torch.tensor(feature["document_ids"], dtype=torch.long)
-                same_doc = doc_ids.unsqueeze(-1) == doc_ids.unsqueeze(-2)
-                causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
-                attention_mask[idx, 0] = same_doc & causal
 
-        res = {
+        return {
             "input_ids": input_ids,
             "position_ids": position_ids,
-            "labels": input_ids.clone(),  # Next-token prediction labels (shifted inside model)
+            "labels": input_ids.clone(),
         }
-        if attention_mask is not None:
-            res["attention_mask"] = attention_mask
-        return res
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test and Verify the Data Pipeline")

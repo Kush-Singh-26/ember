@@ -16,16 +16,43 @@ os.environ["FORGE_NO_SKIP"] = "1"  # Bypass the slow dataset skip operation over
 os.environ["NCCL_SOCKET_IFNAME"] = "lo"
 os.environ["GLOO_SOCKET_IFNAME"] = "lo"
 
-# Pre-download Wikipedia and CodeSearchNet raw files on Rank 0 at startup
+# Initialize HubManager early to detect latest checkpoint step before dataset mixture setup
 import time
+from pathlib import Path
+from forge.config import ForgeConfig
+from forge.state.hub_manager import HubManager
+
+forge_cfg = ForgeConfig.load("forge.yaml")
+hub_manager = HubManager(forge_cfg.state, forge_cfg.name)
+
+latest_step = 0
 lock_file = "/tmp/dataset_download_complete.lock"
+
 if _rank == "0":
     if not os.path.exists(lock_file):
+        # 1. Pull the latest checkpoint from Hugging Face Hub (Nomad Training pattern)
+        print("=== [Forge] Rank 0: Checking Hub/Local for latest checkpoint... ===")
+        output_dir = Path("./outputs")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            pulled_dir = hub_manager.pull_latest(output_dir)
+            if pulled_dir is not None:
+                latest_step = int(pulled_dir.name.split("-")[-1])
+                print(f"[Forge] Rank 0: Pulled latest checkpoint: checkpoint-{latest_step}")
+            else:
+                print("[Forge] Rank 0: No remote or local checkpoint found. Starting fresh.")
+        except Exception as e:
+            print(f"[Forge] Rank 0: WARNING: Checkpoint check failed ({e}). Starting fresh.")
+            
+        with open("/tmp/latest_step.txt", "w") as f:
+            f.write(str(latest_step))
+
+        # 2. Pre-download Wikipedia & CodeSearchNet (local cache)
         print("=== [Forge] Rank 0: Pre-downloading Wikipedia & CodeSearchNet raw files to cache... ===")
         from datasets import load_dataset
-        # Download raw files (no tokenization/mapping)
         load_dataset("wikimedia/wikipedia", "20231101.hi", split="train")
         load_dataset("code-search-net/code_search_net", "python", split="train")
+        
         with open(lock_file, "w") as f:
             f.write("complete")
         print("=== [Forge] Rank 0: Pre-download complete! ===")
@@ -33,7 +60,10 @@ else:
     print(f"=== [Forge] Rank {_rank}: Waiting for Rank 0 to complete pre-download... ===")
     while not os.path.exists(lock_file):
         time.sleep(1)
-
+        
+    with open("/tmp/latest_step.txt", "r") as f:
+        latest_step = int(f.read().strip())
+    print(f"[Forge] Rank {_rank}: Detected latest checkpoint step: {latest_step}")
 
 
 import logging
@@ -137,7 +167,7 @@ def main():
         seed=data_seed,
     )
         
-    # Data collator for block-diagonal masking
+    # Data collator for packed sequences
     data_collator = PackedDataCollator()
 
     # 5. Define Training Arguments
