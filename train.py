@@ -107,8 +107,8 @@ def main():
     
     # Enable gradient checkpointing to fit within 16GB T4 memory, but disable on A100 for speed
     if torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 20 * 1024**3:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
-        print("✅ Gradient Checkpointing enabled (Limited Memory, use_reentrant=True).")
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        print("✅ Gradient Checkpointing enabled (Limited Memory, use_reentrant=False).")
     else:
         print("✅ Gradient Checkpointing disabled (Abundant Memory, High Speed).")
     

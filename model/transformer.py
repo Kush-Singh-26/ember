@@ -314,7 +314,7 @@ class EmberModel(EmberPreTrainedModel):
                         hidden_states,
                         attention_mask,
                         position_ids,
-                        use_reentrant=True,
+                        use_reentrant=False,
                     )
             else:
                 hidden_states = layer(
