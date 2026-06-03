@@ -1,6 +1,8 @@
 import os
 import itertools
 import argparse
+import queue
+import threading
 from typing import Dict, Iterator, List, Optional, Union
 import torch
 import torch.distributed as dist
@@ -96,6 +98,39 @@ class SequencePacker(TorchIterableDataset):
 def gen_sharded(dataset, num_shards, index):
     for i, item in enumerate(dataset):
         if i % num_shards == index:
+            yield item
+
+class ThreadedPrefetcher(TorchIterableDataset):
+    """
+    Wraps an IterableDataset to pre-fetch items asynchronously in a background thread.
+    This avoids PyTorch dataloader worker deadlocks while hiding all network/I/O latency.
+    """
+    def __init__(self, dataset, buffer_size=16):
+        self.dataset = dataset
+        self.buffer_size = buffer_size
+
+    def __iter__(self):
+        q = queue.Queue(maxsize=self.buffer_size)
+        sentinel = object()
+
+        def producer():
+            try:
+                for item in self.dataset:
+                    q.put(item)
+            except Exception as e:
+                q.put(e)
+            finally:
+                q.put(sentinel)
+
+        thread = threading.Thread(target=producer, daemon=True)
+        thread.start()
+
+        while True:
+            item = q.get()
+            if item is sentinel:
+                break
+            if isinstance(item, Exception):
+                raise item
             yield item
 
 def get_pretraining_mixture(
@@ -246,7 +281,9 @@ def get_pretraining_mixture(
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 3,
     )
 
-    return packed_dataset
+    # Wrap the packed dataset in a ThreadedPrefetcher to fetch and pack batches
+    # asynchronously in a background thread, preventing training deadlocks/network waits.
+    return ThreadedPrefetcher(packed_dataset, buffer_size=16)
 
 class PackedDataCollator:
     """Collates packed batches into tensors for the model forward pass."""

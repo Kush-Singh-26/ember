@@ -167,10 +167,8 @@ def main():
                                         # trying to fast-forward 233,600+ batches through the network
                                         # stream on resume. Our shifted data_seed already ensures
                                         # fresh data on each resumption.
-        dataloader_num_workers=0,       # 0 workers per GPU runs data loading in the main process thread.
-                                        # This completely eliminates PyTorch multiprocessing deadlocks
-                                        # when a streamed dataset (like Hindi Wikipedia) has fewer shards
-                                        # than workers (num_shards=1 vs num_workers=2).
+        dataloader_num_workers=0,       # 0 workers because async prefetching is handled by ThreadedPrefetcher,
+                                        # which eliminates CUDA/DDP multiprocessing deadlocks.
     )
 
     # 6. Initialize the ForgeTrainer
