@@ -409,6 +409,7 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         import os
         if torch.cuda.is_available() and os.environ.get("RANK", "0") == "0":
             print(f"=== GPU Memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB ===")
+            print(f"=== Input shapes: input_ids={list(input_ids.shape) if input_ids is not None else None}, attention_mask={list(attention_mask.shape) if attention_mask is not None else None}, labels={list(labels.shape) if labels is not None else None} ===")
             tensors = []
             for obj in gc.get_objects():
                 try:
