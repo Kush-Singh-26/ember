@@ -33,8 +33,8 @@ profiles:
     data_cache: true
 
   kaggle:
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 64  # 2 * 64 * 2 GPUs (DDP) = 256 seq = 524,288 tokens/step
+    per_device_train_batch_size: 1
+    gradient_accumulation_steps: 128 # 1 * 128 * 2 GPUs (DDP) = 256 seq = 524,288 tokens/step
     learning_rate: 3e-4
     max_steps: 60000
     probe_memory: false               # Disabled: prober runs fp32 single-process, wrong for DDP fp16
