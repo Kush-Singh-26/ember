@@ -276,7 +276,7 @@ def get_pretraining_mixture(
 
     # Wrap the packed dataset in a ThreadedPrefetcher to fetch and pack batches
     # asynchronously in a background thread, preventing training deadlocks/network waits.
-    return ThreadedPrefetcher(packed_dataset, buffer_size=16)
+    return ThreadedPrefetcher(packed_dataset, buffer_size=256)
 
 class PackedDataCollator:
     """Collates packed batches into tensors for the model forward pass."""

@@ -136,7 +136,7 @@ def main():
     model = EmberForCausalLM(config)
     
     # Enable gradient checkpointing to fit within 16GB T4 memory, but disable on A100 for speed
-    if torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 20 * 1024**3:
+    if torch.cuda.is_available() and torch.cuda.get_device_properties(0).total_memory < 12 * 1024**3:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         print("✅ Gradient Checkpointing enabled (Limited Memory, use_reentrant=False).")
     else:
@@ -197,8 +197,8 @@ def main():
                                         # trying to fast-forward 233,600+ batches through the network
                                         # stream on resume. Our shifted data_seed already ensures
                                         # fresh data on each resumption.
-        dataloader_num_workers=0,       # 0 workers because async prefetching is handled by ThreadedPrefetcher,
-                                        # which eliminates CUDA/DDP multiprocessing deadlocks.
+        dataloader_num_workers=2,       # 2 workers for parallel data loading. IterableDataset workers only
+                                        # produce Python dicts (no CUDA tensors), so no fork deadlock risk.
     )
 
     # 6. Initialize the ForgeTrainer
