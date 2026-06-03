@@ -191,14 +191,15 @@ def get_pretraining_mixture(
     except Exception as e:
         print(f"⚠️  English (FineWeb-Edu) source failed: {e}")
 
-    # ── 2. Hindi: Wikipedia (streaming) ──────────────────────────────────────
+    # ── 2. Hindi: Wikipedia (local Parquet or streaming) ─────────────────────
+    wiki_dir = "/kaggle/working/wikipedia-hi-parquet"
     try:
-        hi_ds = load_dataset(
-            "wikimedia/wikipedia",
-            "20231101.hi",
-            split="train",
-            streaming=True,
-        )
+        if os.path.isdir(wiki_dir) and os.listdir(wiki_dir):
+            print(f"Loading Wikipedia Hindi from local Parquet: {wiki_dir}")
+            hi_ds = load_dataset("parquet", data_dir=wiki_dir, split="train", streaming=True)
+        else:
+            print("Loading Wikipedia Hindi from HF Hub (streaming)...")
+            hi_ds = load_dataset("wikimedia/wikipedia", "20231101.hi", split="train", streaming=True)
         hi_ds = hi_ds.map(
             lambda x: tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False),
             batched=True,
@@ -206,18 +207,19 @@ def get_pretraining_mixture(
         )
         sources.append(hi_ds)
         weights.append(0.20)
-        print("✅ Added Hindi source: wikimedia/wikipedia 20231101.hi (20% weight, streaming from local cache)")
+        print("✅ Added Hindi source: wikimedia/wikipedia 20231101.hi (20% weight)")
     except Exception as e:
         print(f"⚠️  Hindi source failed: {e}")
 
-    # ── 3. Code: CodeSearchNet Python (streaming) ─────────────────────────────
+    # ── 3. Code: CodeSearchNet Python (local Parquet or streaming) ────────────
+    code_dir = "/kaggle/working/codesearchnet-parquet"
     try:
-        code_ds = load_dataset(
-            "code-search-net/code_search_net",
-            "python",
-            split="train",
-            streaming=True,
-        )
+        if os.path.isdir(code_dir) and os.listdir(code_dir):
+            print(f"Loading CodeSearchNet Python from local Parquet: {code_dir}")
+            code_ds = load_dataset("parquet", data_dir=code_dir, split="train", streaming=True)
+        else:
+            print("Loading CodeSearchNet Python from HF Hub (streaming)...")
+            code_ds = load_dataset("code-search-net/code_search_net", "python", split="train", streaming=True)
         def _tokenize_code(batch):
             # Prefer whole_func_string (full function with docstring), fallback to func_code_string
             texts = batch.get("whole_func_string") or batch.get("func_code_string") or []
@@ -229,7 +231,7 @@ def get_pretraining_mixture(
         )
         sources.append(code_ds)
         weights.append(0.20)
-        print("✅ Added Code source: code-search-net/code_search_net python (20% weight, streaming from local cache)")
+        print("✅ Added Code source: code-search-net/code_search_net python (20% weight)")
     except Exception as e:
         print(f"⚠️  Code source failed: {e}")
 

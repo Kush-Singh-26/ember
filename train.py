@@ -47,11 +47,30 @@ if _rank == "0":
         with open("/tmp/latest_step.txt", "w") as f:
             f.write(str(latest_step))
 
-        # 2. Pre-download Wikipedia & CodeSearchNet (local cache)
-        print("=== [Forge] Rank 0: Pre-downloading Wikipedia & CodeSearchNet raw files to cache... ===")
+        # 2. Pre-download Wikipedia & CodeSearchNet as local Parquet
+        #    streaming=True bypasses HF cache — must save as local files to avoid network I/O
+        print("=== [Forge] Rank 0: Pre-downloading Wikipedia & CodeSearchNet to local Parquet... ===")
         from datasets import load_dataset
-        load_dataset("wikimedia/wikipedia", "20231101.hi", split="train")
-        load_dataset("code-search-net/code_search_net", "python", split="train")
+
+        wiki_dir = "/kaggle/working/wikipedia-hi-parquet"
+        os.makedirs(wiki_dir, exist_ok=True)
+        if not os.listdir(wiki_dir):
+            print("  Downloading Wikipedia Hindi...")
+            wiki_ds = load_dataset("wikimedia/wikipedia", "20231101.hi", split="train")
+            wiki_ds.to_parquet(os.path.join(wiki_dir, "train.parquet"))
+            print(f"  Saved Wikipedia Hindi to {wiki_dir}")
+        else:
+            print(f"  Wikipedia Hindi already exists at {wiki_dir}")
+
+        code_dir = "/kaggle/working/codesearchnet-parquet"
+        os.makedirs(code_dir, exist_ok=True)
+        if not os.listdir(code_dir):
+            print("  Downloading CodeSearchNet Python...")
+            code_ds = load_dataset("code-search-net/code_search_net", "python", split="train")
+            code_ds.to_parquet(os.path.join(code_dir, "train.parquet"))
+            print(f"  Saved CodeSearchNet Python to {code_dir}")
+        else:
+            print(f"  CodeSearchNet Python already exists at {code_dir}")
         
         # 3. Pre-download FineWeb-Edu Parquet shards to local disk
         #    6 shards ≈ 13 GB, fits within Kaggle's 20GB disk after checkpoint + other data
