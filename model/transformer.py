@@ -405,25 +405,6 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        import gc
-        import os
-        if torch.cuda.is_available() and os.environ.get("RANK", "0") == "0":
-            print(f"=== GPU Memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB ===")
-            print(f"=== Input shapes: input_ids={list(input_ids.shape) if input_ids is not None else None}, attention_mask={list(attention_mask.shape) if attention_mask is not None else None}, labels={list(labels.shape) if labels is not None else None} ===")
-            tensors = []
-            for obj in gc.get_objects():
-                try:
-                    if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
-                        if obj.is_cuda:
-                            tensors.append(obj)
-                except Exception:
-                    pass
-            # Sort by size in bytes
-            tensors.sort(key=lambda t: t.numel() * t.element_size(), reverse=True)
-            print("Top 15 GPU Tensors:")
-            for i, t in enumerate(tensors[:15]):
-                print(f"  {i}: shape={list(t.shape)}, dtype={t.dtype}, device={t.device}, size={t.numel() * t.element_size() / 1024**2:.2f} MB")
-
         return_dict = return_dict if return_dict is not None else getattr(self.config, "return_dict", True)
 
         outputs = self.model(
