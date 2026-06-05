@@ -81,6 +81,25 @@ else:
 
 import logging
 import torch
+
+# PyTorch 2.6+ weights_only compatibility for loading RNG state with numpy
+try:
+    import numpy as np
+    reconstruct_fn = None
+    if hasattr(np, "_core") and hasattr(np._core, "multiarray") and hasattr(np._core.multiarray, "_reconstruct"):
+        reconstruct_fn = np._core.multiarray._reconstruct
+    elif hasattr(np, "core") and hasattr(np.core, "multiarray") and hasattr(np.core.multiarray, "_reconstruct"):
+        reconstruct_fn = np.core.multiarray._reconstruct
+    
+    globals_to_add = [np.ndarray, np.dtype]
+    if reconstruct_fn is not None:
+        globals_to_add.append(reconstruct_fn)
+        
+    if hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals(globals_to_add)
+except Exception as e:
+    logging.warning(f"Failed to add numpy to PyTorch safe globals: {e}")
+
 from transformers import TrainingArguments, AutoTokenizer
 from forge import ForgeTrainer
 
