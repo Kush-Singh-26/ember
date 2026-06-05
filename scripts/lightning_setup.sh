@@ -1,95 +1,68 @@
 #!/usr/bin/env bash
-# =============================================================================
-# Ember-275M — Lightning AI Studio First-Time Setup
-# Run ONCE after cloning the repo into a new Studio.
-# Usage: bash scripts/lightning_setup.sh
-# =============================================================================
+# Usage: bash scripts/lightning_setup.sh hf_YOUR_TOKEN_HERE
+# Does everything: env vars, deps, FineWeb download, checkpoint pull, training launch
+
 set -e
 
-EMBER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STUDIO_DATA_DIR="/teamspace/studios/this_studio/ember-data"
-FINEWEB_DIR="$STUDIO_DATA_DIR/fineweb-edu-parquet"
-NUM_SHARDS=12
-
-echo "============================================================"
-echo " Ember-275M  —  Lightning AI A100 Setup"
-echo " Studio data dir: $STUDIO_DATA_DIR"
-echo "============================================================"
-
-# ── 1. Install Python dependencies ─────────────────────────────────────────
-echo ""
-echo ">>> [1/4] Installing Python dependencies..."
-pip install uv --quiet
-uv pip install -r "$EMBER_DIR/requirements.txt"
-# Install lm_forge — adjust the path if you have a local copy
-pip install lm-forge --quiet
-echo "    ✅ Dependencies installed."
-
-# ── 2. Write persistent environment variables ──────────────────────────────
-echo ""
-echo ">>> [2/4] Writing persistent env vars to ~/.bashrc..."
-
-# Prompt for HF token if not already set
+HF_TOKEN="${1:-}"
 if [ -z "$HF_TOKEN" ]; then
-    echo -n "    Enter your HuggingFace token (hf_...): "
-    read -s HF_TOKEN
-    echo ""
+    echo "Usage: bash scripts/lightning_setup.sh hf_YOUR_TOKEN_HERE"
+    exit 1
 fi
 
-# Write to bashrc (idempotent — skip if already present)
-if ! grep -q "FORGE_DATA_DIR" ~/.bashrc; then
-    cat >> ~/.bashrc << EOF
-
-# ── Ember-275M Lightning AI config ──────────────────────────────────────────
-export HF_TOKEN="$HF_TOKEN"
-export FORGE_NO_SKIP=1
-export FORGE_DATA_DIR="$FINEWEB_DIR"
-export NCCL_SOCKET_IFNAME=lo
-export GLOO_SOCKET_IFNAME=lo
-EOF
-    echo "    ✅ Env vars written to ~/.bashrc"
-else
-    echo "    ℹ️  Env vars already in ~/.bashrc — skipping."
-fi
-
-# Export for the current shell session
-export HF_TOKEN="$HF_TOKEN"
-export FORGE_NO_SKIP=1
-export FORGE_DATA_DIR="$FINEWEB_DIR"
-
-# ── 3. Pre-download FineWeb-Edu shards ─────────────────────────────────────
-echo ""
-echo ">>> [3/4] Pre-downloading FineWeb-Edu ($NUM_SHARDS shards → $FINEWEB_DIR)..."
-echo "    This is a one-time download (~26 GB). Existing shards are skipped."
-mkdir -p "$FINEWEB_DIR"
-
+EMBER_DIR="/teamspace/studios/this_studio/ember"
+FORGE_DIR="/teamspace/studios/this_studio/lm_forge"
+DATA_DIR="/teamspace/studios/this_studio/ember-data/fineweb-edu-parquet"
 BASE_URL="https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu/resolve/main/sample/100BT"
-for i in $(seq 0 $((NUM_SHARDS - 1))); do
-    SHARD=$(printf "%03d_%05d.parquet" $((i / 10)) $((i % 10)))
-    DEST="$FINEWEB_DIR/$SHARD"
-    if [ ! -f "$DEST" ]; then
-        echo "    Downloading $SHARD..."
-        wget -q --show-progress "$BASE_URL/$SHARD" -O "$DEST"
+
+cd "$EMBER_DIR"
+
+echo "=== [1/5] Writing env vars to ~/.bashrc ==="
+grep -v "Ember-275M\|HF_TOKEN\|FORGE_NO_SKIP\|FORGE_DATA_DIR\|NCCL_SOCKET_IFNAME\|GLOO_SOCKET_IFNAME" ~/.bashrc > /tmp/bashrc_clean || true
+cp /tmp/bashrc_clean ~/.bashrc
+echo "" >> ~/.bashrc
+echo "# Ember-275M Lightning AI" >> ~/.bashrc
+echo "export HF_TOKEN=$HF_TOKEN" >> ~/.bashrc
+echo "export FORGE_NO_SKIP=1" >> ~/.bashrc
+echo "export FORGE_DATA_DIR=$DATA_DIR" >> ~/.bashrc
+echo "export NCCL_SOCKET_IFNAME=lo" >> ~/.bashrc
+echo "export GLOO_SOCKET_IFNAME=lo" >> ~/.bashrc
+source ~/.bashrc
+echo "    Done."
+
+echo "=== [2/5] Installing dependencies ==="
+pip install uv --quiet
+uv pip install -r requirements.txt --quiet
+uv pip install -e "$FORGE_DIR" --quiet
+echo "    Done."
+
+echo "=== [3/5] Downloading FineWeb-Edu shards (12 x ~2GB) ==="
+mkdir -p "$DATA_DIR"
+for i in 0 1 2 3 4 5 6 7 8 9 10 11; do
+    MAJOR=$((i / 10))
+    MINOR=$((i % 10))
+    NAME=$(printf "%03d_%05d.parquet" $MAJOR $MINOR)
+    DEST="$DATA_DIR/$NAME"
+    if [ -f "$DEST" ]; then
+        echo "    $NAME already exists, skipping."
     else
-        echo "    $SHARD already exists — skipping."
+        echo "    Downloading $NAME ..."
+        wget -q --show-progress "$BASE_URL/$NAME" -O "$DEST"
     fi
 done
-echo "    ✅ FineWeb-Edu download complete ($NUM_SHARDS shards)."
+echo "    Done."
 
-# ── 4. Pull latest checkpoint from HF Hub ──────────────────────────────────
-echo ""
-echo ">>> [4/4] Pulling latest checkpoint from HF Hub..."
-cd "$EMBER_DIR"
+echo "=== [4/5] Pulling latest checkpoint from HF Hub ==="
 forge pull
-echo "    ✅ Checkpoint pulled into ./outputs/"
+echo "    Done."
 
+echo "=== [5/5] Launching training in tmux ==="
+tmux new-session -d -s ember "cd $EMBER_DIR && FORGE_PROFILE=lightning-a100 python train.py 2>&1 | tee /tmp/ember_train.log"
 echo ""
-echo "============================================================"
-echo " Setup complete! Start training with:"
+echo "================================================"
+echo " Training is running in tmux session 'ember'"
 echo ""
-echo "   bash scripts/train_lightning.sh"
-echo ""
-echo " Or manually:"
-echo "   source ~/.bashrc"
-echo "   FORGE_PROFILE=lightning-a100 python train.py"
-echo "============================================================"
+echo " Watch live:  tmux attach -t ember"
+echo " View log:    tail -f /tmp/ember_train.log"
+echo " Detach:      Ctrl+b then d"
+echo "================================================"
