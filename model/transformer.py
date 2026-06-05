@@ -120,6 +120,7 @@ class EmberAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:
         bsz, q_len, _ = hidden_states.size()
 
@@ -138,13 +139,29 @@ class EmberAttention(nn.Module):
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_output = F.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            dropout_p=self.config.dropout if self.training else 0.0,
-            is_causal=True,
-        )
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # Block-diagonal causal mask from PackedDataCollator: (B, 1, S, S) bool.
+            # True = attend, False = mask. The causal constraint is already baked into the mask
+            # by the collator (same_doc & lower_triangular), so is_causal=False here.
+            attn_output = F.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                attn_mask=attention_mask,
+                dropout_p=self.config.dropout if self.training else 0.0,
+                is_causal=False,
+            )
+        else:
+            # Standard causal attention for inference or non-packed inputs.
+            # dim != 4 check ensures 2D HF-style padding masks (inference) don't
+            # accidentally trigger the packed-training path.
+            attn_output = F.scaled_dot_product_attention(
+                query_states,
+                key_states,
+                value_states,
+                dropout_p=self.config.dropout if self.training else 0.0,
+                is_causal=True,
+            )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.view(bsz, q_len, self.num_heads * self.head_dim)
@@ -180,6 +197,7 @@ class EmberDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:
         # Pre-Norm Attention
         residual = hidden_states
@@ -187,6 +205,7 @@ class EmberDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             position_ids=position_ids,
+            attention_mask=attention_mask,
         )
         hidden_states = residual + hidden_states
 
@@ -256,6 +275,7 @@ class EmberModel(EmberPreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.BoolTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -284,18 +304,21 @@ class EmberModel(EmberPreTrainedModel):
                         layer.__call__,
                         hidden_states,
                         position_ids,
+                        attention_mask,
                     )
                 else:
                     hidden_states = torch.utils.checkpoint.checkpoint(
                         layer,
                         hidden_states,
                         position_ids,
+                        attention_mask,
                         use_reentrant=False,
                     )
             else:
                 hidden_states = layer(
                     hidden_states,
                     position_ids=position_ids,
+                    attention_mask=attention_mask,
                 )
 
         hidden_states = self.norm(hidden_states)
@@ -372,6 +395,7 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.BoolTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         output_attentions: Optional[bool] = None,
@@ -384,6 +408,7 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
         outputs = self.model(
             input_ids=input_ids,
             position_ids=position_ids,
+            attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
             **kwargs,
         )

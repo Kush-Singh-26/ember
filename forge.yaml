@@ -26,7 +26,7 @@ profiles:
 
   modal:
     per_device_train_batch_size: 8
-    gradient_accumulation_steps: 32  # 8 * 32 * 1 GPU = 256 seq = 524,288 tokens/step
+    gradient_accumulation_steps: 16  # 8 * 16 * 1 GPU = 128 seq @ 4K ctx = 524,288 tokens/step
     learning_rate: 3e-4
     max_steps: 60000
     probe_memory: false
@@ -46,9 +46,49 @@ profiles:
 
   colab:
     per_device_train_batch_size: 2
-    gradient_accumulation_steps: 128 # 2 * 128 * 1 GPU = 256 seq = 524,288 tokens/step
+    gradient_accumulation_steps: 64  # 2 * 64 * 1 GPU = 128 seq @ 4K ctx = 524,288 tokens/step
     learning_rate: 3e-4
     max_steps: 60000
     probe_memory: true
     data_cache: false
     fp16: true
+
+  modal-continue:
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 16  # 8 * 16 * 1 GPU = 128 seq @ 4K ctx = 524,288 tokens/step
+    learning_rate: 1e-4              # Lower LR for continued training from checkpoint
+    max_steps: 30000                 # ~15.7B tokens at 524,288 tokens/step
+    probe_memory: false
+    data_cache: true
+    warmup_steps: 200                # Short warmup to re-stabilize after mask + data changes
+
+  # ── Lightning AI profiles ─────────────────────────────────────────────────
+  # Set FORGE_PROFILE=lightning-h100 (or lightning-a100) before running train.py.
+  # Use FORGE_DATA_DIR=/teamspace/studios/this_studio/data/fineweb-edu-parquet
+
+  lightning-a100:
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 16  # 8 * 16 * 1 GPU = 524,288 tokens/step @ 4K ctx
+    learning_rate: 1e-4              # Lower LR for checkpoint resumption
+    max_steps: 30000                 # ~15.7B more tokens
+    probe_memory: false
+    data_cache: true
+    warmup_steps: 200                # Re-stabilise after mask + data changes at resumption
+
+  lightning-h100:
+    per_device_train_batch_size: 16  # H100 80GB has same VRAM but far higher bandwidth
+    gradient_accumulation_steps: 8   # 16 * 8 * 1 GPU = 524,288 tokens/step @ 4K ctx
+    learning_rate: 1e-4
+    max_steps: 30000
+    probe_memory: false
+    data_cache: true
+    warmup_steps: 200
+
+  lightning-4xa100:                  # DDP across 4 A100s — use with torchrun --nproc_per_node=4
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 4   # 8 * 4 * 4 GPUs = 524,288 tokens/step @ 4K ctx
+    learning_rate: 1e-4
+    max_steps: 30000
+    probe_memory: false
+    data_cache: true
+    warmup_steps: 200

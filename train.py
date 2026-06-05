@@ -47,38 +47,13 @@ if _rank == "0":
         with open("/tmp/latest_step.txt", "w") as f:
             f.write(str(latest_step))
 
-        # 2. Pre-download Wikipedia & CodeSearchNet as local Parquet
-        #    streaming=True bypasses HF cache — must save as local files to avoid network I/O
-        print("=== [Forge] Rank 0: Pre-downloading Wikipedia & CodeSearchNet to local Parquet... ===")
-        from datasets import load_dataset
-
-        wiki_dir = "/kaggle/working/wikipedia-hi-parquet"
-        os.makedirs(wiki_dir, exist_ok=True)
-        if not os.listdir(wiki_dir):
-            print("  Downloading Wikipedia Hindi...")
-            wiki_ds = load_dataset("wikimedia/wikipedia", "20231101.hi", split="train")
-            wiki_ds.to_parquet(os.path.join(wiki_dir, "train.parquet"))
-            print(f"  Saved Wikipedia Hindi to {wiki_dir}")
-        else:
-            print(f"  Wikipedia Hindi already exists at {wiki_dir}")
-
-        code_dir = "/kaggle/working/codesearchnet-parquet"
-        os.makedirs(code_dir, exist_ok=True)
-        if not os.listdir(code_dir):
-            print("  Downloading CodeSearchNet Python...")
-            code_ds = load_dataset("code-search-net/code_search_net", "python", split="train")
-            code_ds.to_parquet(os.path.join(code_dir, "train.parquet"))
-            print(f"  Saved CodeSearchNet Python to {code_dir}")
-        else:
-            print(f"  CodeSearchNet Python already exists at {code_dir}")
-        
-        # 3. Pre-download FineWeb-Edu Parquet shards to local disk
-        #    6 shards ≈ 13 GB, fits within Kaggle's 20GB disk after checkpoint + other data
-        #    ~4.2B tokens — enough for 10K steps (5.24B needed), cycles via stopping_strategy
+        # 2. Pre-download FineWeb-Edu Parquet shards to local disk
+        #    12 shards ≈ 26 GB — doubled from 6 to reduce FineWeb-Edu cycling during longer runs.
+        #    CC-100 Hindi and The Stack Python are now streamed directly (too large to pre-download).
         import urllib.request
-        fineweb_dir = "/kaggle/working/fineweb-edu-parquet"
+        fineweb_dir = os.environ.get("FORGE_DATA_DIR", "/kaggle/working/fineweb-edu-parquet")
         os.makedirs(fineweb_dir, exist_ok=True)
-        num_shards = 6
+        num_shards = 12
         print(f"=== [Forge] Rank 0: Pre-downloading FineWeb-Edu ({num_shards} shards) to {fineweb_dir}... ===")
         for i in range(num_shards):
             shard_name = f"{i//10:03d}_{i%10:05d}.parquet"
@@ -166,7 +141,7 @@ def main():
         num_key_value_heads=8,
         head_dim=64,
         intermediate_size=2730,
-        max_position_embeddings=2048,
+        max_position_embeddings=4096,  # Extended from 2048 — RoPE cache built fresh each run
         rms_norm_eps=1e-6,
         tie_word_embeddings=True,
     )
@@ -200,7 +175,7 @@ def main():
     
     train_dataset = get_pretraining_mixture(
         tokenizer_name=tokenizer_name,
-        max_seq_len=2048,
+        max_seq_len=4096,  # Extended from 2048
         buffer_size=1000,
         seed=data_seed,
     )
@@ -217,10 +192,11 @@ def main():
         gradient_accumulation_steps=128,  # Placeholder, overridden by forge.yaml profile
         learning_rate=3e-4,
         weight_decay=0.1,
+        max_grad_norm=1.0,              # Gradient clipping — prevents loss spikes from exploding gradients
         max_steps=100000,               # Default max steps (overridden by active profile)
         logging_steps=10,
         save_steps=50,                  # Default; kaggle profile overrides to 200
-        warmup_steps=2000,              # 2,000 steps warm-up
+        warmup_steps=1000,              # Reduced from 2000 — 2000 steps = ~1B tokens of warmup, excessive for 275M
         lr_scheduler_type="cosine",
         adam_beta1=0.9,
         adam_beta2=0.95,

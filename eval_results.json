@@ -1,9 +1,32 @@
 {
+  "hellaswag": {
+    "accuracy": 0.336,
+    "correct": 168,
+    "total": 500
+  },
+  "arc_easy": {
+    "accuracy": 0.296,
+    "correct": 148,
+    "total": 500
+  },
+  "arc_challenge": {
+    "accuracy": 0.22073578595317725,
+    "correct": 66,
+    "total": 299
+  },
+  "winoGrande": {
+    "accuracy": 0.526,
+    "correct": 263,
+    "total": 500
+  },
+  "wikitext2": {
+    "perplexity": 38.012784045757506
+  },
   "mbpp": {
-    "bleu": 0.0,
+    "bleu": 1.192813346349035,
     "pass_at_1": 0.0,
     "correct": 0,
-    "total": 1
+    "total": 500
   },
-  "macro_f1": 0.0
+  "macro_f1": 0.3446839464882943
 }

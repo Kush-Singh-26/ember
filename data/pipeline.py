@@ -51,10 +51,11 @@ class SequencePacker(TorchIterableDataset):
             if not input_ids:
                 continue
 
-            # Truncate to leave room for BOS + EOS so position_ids stay in [0, max_seq_len-1]
-            # Only truncate if max_seq_len is reasonably large (e.g. >= 512) to allow unit tests
-            # with small max_seq_len to test boundary crossing without aggressive truncation.
-            if self.max_seq_len >= 512:
+            # Only truncate documents that individually exceed max_seq_len (leaving room for BOS + EOS).
+            # Short documents are packed together naturally by the buffer loop below — no pre-truncation
+            # needed. This fixes the bug where a 500-token doc was capped at 2046 tokens, wasting ~75%
+            # of a 2048-token chunk. Now multiple short docs fill each chunk efficiently.
+            if len(input_ids) > self.max_seq_len - 2:
                 input_ids = input_ids[:self.max_seq_len - 2]
 
             # Pack doc with BOS and EOS tags
@@ -142,14 +143,15 @@ def get_pretraining_mixture(
     """
     Loads, interleaves, tokenizes, and packs the pre-training data mixture.
 
-    Data mixture (60% English / 20% Hindi / 20% Code):
-      - English: FineWeb-Edu sample-100BT (~100B tokens, Parquet, streaming from HF Hub)
-      - Hindi:   wikimedia/wikipedia Hindi (~400k articles, streaming)
-      - Code:    code-search-net/code_search_net Python (~180k functions, streaming)
+    Data mixture (55% English / 20% Hindi / 20% Code / 5% Math):
+      - English: FineWeb-Edu sample-100BT (~100B tokens, Parquet, streaming or local)
+      - Hindi:   CC-100 Hindi (~4B tokens, streaming) with Wikipedia Hindi fallback
+      - Code:    The Stack Python (~30B tokens, streaming) with CodeSearchNet fallback
+      - Math:    FineMath-4+ (~4B tokens, streaming)
 
     All sources use streaming=True to avoid large disk downloads (critical for Kaggle
-    which has ~100GB disk). FineWeb-Edu is already in Parquet format on HF Hub,
-    so no local storage or conversion is needed.
+    which has ~100GB disk). FineWeb-Edu is read from pre-downloaded local Parquet shards
+    when available, otherwise streamed from HF Hub.
     """
     print(f"Initializing data mixture with tokenizer: {tokenizer_name}")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -181,59 +183,117 @@ def get_pretraining_mixture(
                 streaming=True,
             )
         en_ds = en_ds.map(
-            lambda x: tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False),
+            lambda x: tokenizer(x["text"], add_special_tokens=False),
             batched=True,
             remove_columns=en_ds.column_names,
         )
         sources.append(en_ds)
-        weights.append(0.60)
-        print("✅ Added English source: FineWeb-Edu sample-100BT (60% weight)")
+        weights.append(0.55)  # Reduced from 0.60 to accommodate FineMath
+        print("✅ Added English source: FineWeb-Edu sample-100BT (55% weight)")
     except Exception as e:
         print(f"⚠️  English (FineWeb-Edu) source failed: {e}")
 
-    # ── 2. Hindi: Wikipedia (local Parquet or streaming) ─────────────────────
-    wiki_dir = "/kaggle/working/wikipedia-hi-parquet"
+    # ── 2. Hindi: CC-100 Hindi (~4B tokens) ──────────────────────────────────
+    # Upgraded from Wikipedia Hindi (~500M tokens) — 8x more data reduces repetition overfitting.
+    # Falls back to Wikipedia Hindi if CC-100 is unavailable.
     try:
-        if os.path.isdir(wiki_dir) and os.listdir(wiki_dir):
-            print(f"Loading Wikipedia Hindi from local Parquet: {wiki_dir}")
-            hi_ds = load_dataset("parquet", data_dir=wiki_dir, split="train", streaming=True)
-        else:
-            print("Loading Wikipedia Hindi from HF Hub (streaming)...")
-            hi_ds = load_dataset("wikimedia/wikipedia", "20231101.hi", split="train", streaming=True)
+        hi_ds = load_dataset(
+            "statmt/cc100",
+            "hi",
+            split="train",
+            streaming=True,
+        )
         hi_ds = hi_ds.map(
-            lambda x: tokenizer(x["text"], truncation=True, max_length=max_seq_len, add_special_tokens=False),
+            lambda x: tokenizer(x["text"], add_special_tokens=False),
             batched=True,
-            remove_columns=["id", "url", "title", "text"],
+            remove_columns=hi_ds.column_names,
         )
         sources.append(hi_ds)
         weights.append(0.20)
-        print("✅ Added Hindi source: wikimedia/wikipedia 20231101.hi (20% weight)")
+        print("✅ Added Hindi source: CC-100 Hindi (~4B tokens, 20% weight)")
     except Exception as e:
-        print(f"⚠️  Hindi source failed: {e}")
+        print(f"⚠️  Hindi (CC-100) source failed: {e}, falling back to Wikipedia Hindi")
+        try:
+            wiki_dir = "/kaggle/working/wikipedia-hi-parquet"
+            if os.path.isdir(wiki_dir) and os.listdir(wiki_dir):
+                print(f"Loading Wikipedia Hindi from local Parquet: {wiki_dir}")
+                hi_ds = load_dataset("parquet", data_dir=wiki_dir, split="train", streaming=True)
+            else:
+                print("Loading Wikipedia Hindi from HF Hub (streaming)...")
+                hi_ds = load_dataset("wikimedia/wikipedia", "20231101.hi", split="train", streaming=True)
+            hi_ds = hi_ds.map(
+                lambda x: tokenizer(x["text"], add_special_tokens=False),
+                batched=True,
+                remove_columns=hi_ds.column_names,
+            )
+            sources.append(hi_ds)
+            weights.append(0.20)
+            print("✅ Added Hindi source: Wikipedia Hindi (fallback, 20% weight)")
+        except Exception as e2:
+            print(f"⚠️  Hindi fallback also failed: {e2}")
 
-    # ── 3. Code: CodeSearchNet Python (local Parquet or streaming) ────────────
-    code_dir = "/kaggle/working/codesearchnet-parquet"
+    # ── 3. Code: The Stack Python (~30B tokens) ───────────────────────────────
+    # Upgraded from CodeSearchNet (~300M tokens, ~180k functions) — 100x more data.
+    # The Stack requires HF authentication for gated access. Falls back to CodeSearchNet.
     try:
-        if os.path.isdir(code_dir) and os.listdir(code_dir):
-            print(f"Loading CodeSearchNet Python from local Parquet: {code_dir}")
-            code_ds = load_dataset("parquet", data_dir=code_dir, split="train", streaming=True)
-        else:
-            print("Loading CodeSearchNet Python from HF Hub (streaming)...")
-            code_ds = load_dataset("code-search-net/code_search_net", "python", split="train", streaming=True)
-        def _tokenize_code(batch):
-            # Prefer whole_func_string (full function with docstring), fallback to func_code_string
-            texts = batch.get("whole_func_string") or batch.get("func_code_string") or []
-            return tokenizer(texts, truncation=True, max_length=max_seq_len, add_special_tokens=False)
+        code_ds = load_dataset(
+            "bigcode/the-stack",
+            name="data/python",
+            split="train",
+            streaming=True,
+        )
         code_ds = code_ds.map(
-            _tokenize_code,
+            lambda x: tokenizer(x["content"], add_special_tokens=False),
             batched=True,
-            remove_columns=list(code_ds.column_names),
+            remove_columns=code_ds.column_names,
         )
         sources.append(code_ds)
         weights.append(0.20)
-        print("✅ Added Code source: code-search-net/code_search_net python (20% weight)")
+        print("✅ Added Code source: The Stack Python (~30B tokens, 20% weight)")
     except Exception as e:
-        print(f"⚠️  Code source failed: {e}")
+        print(f"⚠️  Code (The Stack) source failed: {e}, falling back to CodeSearchNet")
+        try:
+            code_dir = "/kaggle/working/codesearchnet-parquet"
+            if os.path.isdir(code_dir) and os.listdir(code_dir):
+                print(f"Loading CodeSearchNet Python from local Parquet: {code_dir}")
+                code_ds = load_dataset("parquet", data_dir=code_dir, split="train", streaming=True)
+            else:
+                print("Loading CodeSearchNet Python from HF Hub (streaming)...")
+                code_ds = load_dataset("code-search-net/code_search_net", "python", split="train", streaming=True)
+            def _tokenize_code(batch):
+                texts = batch.get("whole_func_string") or batch.get("func_code_string") or []
+                return tokenizer(texts, add_special_tokens=False)
+            code_ds = code_ds.map(
+                _tokenize_code,
+                batched=True,
+                remove_columns=list(code_ds.column_names),
+            )
+            sources.append(code_ds)
+            weights.append(0.20)
+            print("✅ Added Code source: CodeSearchNet Python (fallback, 20% weight)")
+        except Exception as e2:
+            print(f"⚠️  Code fallback also failed: {e2}")
+
+    # ── 4. Math: FineMath-4+ (~4B tokens of curated mathematical content) ──────
+    # Improves numerical reasoning, which is currently near-random on benchmarks.
+    # 5% weight keeps it as a useful supplement without overwhelming other sources.
+    try:
+        math_ds = load_dataset(
+            "HuggingFaceFW/finemath",
+            name="finemath-4plus",
+            split="train",
+            streaming=True,
+        )
+        math_ds = math_ds.map(
+            lambda x: tokenizer(x["text"], add_special_tokens=False),
+            batched=True,
+            remove_columns=math_ds.column_names,
+        )
+        sources.append(math_ds)
+        weights.append(0.05)  # 5% math
+        print("✅ Added Math source: FineMath-4+ (~4B tokens, 5% weight)")
+    except Exception as e:
+        print(f"⚠️  Math (FineMath) source failed: {e}")
 
     if not sources:
         raise RuntimeError("Failed to load any data source for training mixture.")
@@ -293,21 +353,40 @@ def get_pretraining_mixture(
     return ThreadedPrefetcher(packed_dataset, buffer_size=256)
 
 class PackedDataCollator:
-    """Collates packed batches into tensors for the model forward pass."""
+    """Collates packed batches into tensors for the model forward pass.
+
+    Constructs a block-diagonal causal attention mask from document_ids to prevent
+    cross-document attention leakage when multiple documents are packed into a single
+    sequence. Each token only attends to tokens in the same document that come at or
+    before its position (causal within-document attention).
+    """
     def __call__(self, features: List[Dict[str, List[int]]]) -> Dict[str, torch.Tensor]:
         batch_size = len(features)
         seq_len = len(features[0]["input_ids"])
 
         input_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
         position_ids = torch.zeros(batch_size, seq_len, dtype=torch.long)
+        # Block-diagonal causal mask: (B, 1, S, S), bool — True = attend, False = mask.
+        # Shape (B, 1, S, S) broadcasts correctly to (B, num_heads, S, S) in SDPA.
+        attention_mask = torch.zeros(batch_size, 1, seq_len, seq_len, dtype=torch.bool)
+
+        # Base causal mask: token i can only attend to token j where j <= i.
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
 
         for idx, feature in enumerate(features):
             input_ids[idx] = torch.tensor(feature["input_ids"], dtype=torch.long)
             position_ids[idx] = torch.tensor(feature["position_ids"], dtype=torch.long)
 
+            # Vectorized block-diagonal mask: attend iff same document AND causal.
+            # doc_ids_tensor[i] == doc_ids_tensor[j] → same_doc[i, j] = True
+            doc_ids_tensor = torch.tensor(feature["document_ids"], dtype=torch.long)
+            same_doc = doc_ids_tensor.unsqueeze(1) == doc_ids_tensor.unsqueeze(0)  # (S, S)
+            attention_mask[idx, 0] = same_doc & causal_mask
+
         return {
             "input_ids": input_ids,
             "position_ids": position_ids,
+            "attention_mask": attention_mask,
             "labels": input_ids.clone(),
         }
 
