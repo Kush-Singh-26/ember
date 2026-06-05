@@ -5,6 +5,15 @@ import socket
 # Prevent network calls from hanging indefinitely by setting a 60s timeout
 socket.setdefaulttimeout(60.0)
 
+import torch
+# Monkeypatch torch.load to force weights_only=False (fixes PyTorch 2.6+ unpickling error for RNG states)
+_orig_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    if "weights_only" in kwargs:
+        kwargs["weights_only"] = False
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+
 # Use separate HF_HOME per rank to prevent DDP lock deadlocks during checkpoint downloads,
 # but share the datasets cache folder to avoid duplicate downloads of Wikipedia & CodeSearchNet.
 _rank = os.environ.get("RANK", "0")
