@@ -1,0 +1,9 @@
+{
+  "mbpp": {
+    "bleu": 0.0,
+    "pass_at_1": 0.0,
+    "correct": 0,
+    "total": 1
+  },
+  "macro_f1": 0.0
+}

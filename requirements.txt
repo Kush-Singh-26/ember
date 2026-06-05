@@ -10,4 +10,5 @@ peft>=0.9.0
 lm-eval>=0.4.0
 pytest>=8.0.0
 python-dotenv>=1.0.0
+sacrebleu>=2.0.0
 
