@@ -12,7 +12,7 @@ class EmberConfig(PretrainedConfig):
         num_key_value_heads=8,       # KV heads (GQA 2:1 ratio)
         head_dim=64,
         intermediate_size=2730,      # SwiGLU: ~8/3 * hidden_size
-        max_position_embeddings=2048,
+        max_position_embeddings=4096,  # Extended from 2048 at step 3650
         rope_theta=10000.0,
         rms_norm_eps=1e-6,
         tie_word_embeddings=True,
