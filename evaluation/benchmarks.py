@@ -70,21 +70,26 @@ def compute_log_likelihood(model, tokenizer, context: str, continuation: str, de
 
 
 def compute_perplexity(model, tokenizer, text: str, device: str) -> float:
-    max_ctx = getattr(model.config, "max_position_embeddings", 2048)
+    """
+    Sliding-window perplexity: chunks the text into non-overlapping windows of
+    max_ctx tokens so we never exceed the model's context length, regardless of
+    what is stored in config.json. Averages NLL across all chunks.
+    """
+    max_ctx = getattr(model.config, "max_position_embeddings", 4096)
 
-    # Truncate text to fit in one forward pass (~4 chars per token)
-    max_chars = max_ctx * 4
-    if len(text) > max_chars:
-        text = text[:max_chars]
+    encodings = tokenizer(text, return_tensors="pt")
+    input_ids = encodings.input_ids[0]  # (total_tokens,)
 
-    encodings = tokenizer(text, return_tensors="pt").to(device)
-    input_ids = encodings.input_ids
-    targets = input_ids.clone()
-    targets[:, 0] = -100
+    nlls = []
+    for start in range(0, len(input_ids), max_ctx):
+        chunk = input_ids[start : start + max_ctx].unsqueeze(0).to(device)
+        targets = chunk.clone()
+        targets[:, 0] = -100  # don't predict the first token
+        with torch.no_grad():
+            outputs = model(chunk, labels=targets)
+        nlls.append(outputs.loss.item())
 
-    with torch.no_grad():
-        outputs = model(input_ids, labels=targets)
-    return math.exp(outputs.loss.item())
+    return math.exp(sum(nlls) / len(nlls))
 
 
 def format_table(results: dict) -> str:
@@ -202,15 +207,12 @@ def eval_winoGrande(model, tokenizer, device: str, num_samples: int) -> dict:
 
 
 def eval_wikitext2(model, tokenizer, device: str, num_samples: int) -> dict:
-    print(f"\n[WikiText-2] Computing perplexity...")
+    print(f"\n[WikiText-2] Computing perplexity (sliding window)...")
     from datasets import load_dataset
     ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
 
+    # Use full test set text — sliding window handles sequences longer than max_ctx
     full_text = "\n".join(ds["text"])
-
-    # Limit to ~20k chars (~5k tokens) for reasonable CPU runtime
-    if len(full_text) > 20_000:
-        full_text = full_text[:20_000]
 
     ppl = compute_perplexity(model, tokenizer, full_text, device)
     print(f"  Perplexity: {ppl:.4f}")
@@ -313,7 +315,9 @@ def main():
 
     model, tokenizer = load_model(args.model, device)
 
-    bench_list = list(BENCHMARKS.keys())
+    # Default: run all benchmarks except mbpp (takes 30+ min, not meaningful for base models)
+    DEFAULT_BENCHMARKS = ["hellaswag", "arc_easy", "arc_challenge", "winoGrande", "wikitext2"]
+    bench_list = DEFAULT_BENCHMARKS
     if args.benchmarks:
         bench_list = [b.strip() for b in args.benchmarks.split(",")]
 
