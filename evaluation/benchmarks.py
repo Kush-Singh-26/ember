@@ -71,14 +71,21 @@ def compute_log_likelihood(model, tokenizer, context: str, continuation: str, de
 
 def compute_perplexity(model, tokenizer, text: str, device: str) -> float:
     """
-    Sliding-window perplexity: chunks the text into non-overlapping windows of
-    max_ctx tokens so we never exceed the model's context length, regardless of
-    what is stored in config.json. Averages NLL across all chunks.
+    Sliding-window perplexity: tokenizes the text in sentence-level batches to
+    avoid the HuggingFace tokenizer length warning, then runs non-overlapping
+    max_ctx-token chunks through the model and averages NLL across all chunks.
     """
     max_ctx = getattr(model.config, "max_position_embeddings", 4096)
 
-    encodings = tokenizer(text, return_tensors="pt")
-    input_ids = encodings.input_ids[0]  # (total_tokens,)
+    # Tokenize in small batches (by line) to avoid the tokenizer warning
+    lines = [l for l in text.split("\n") if l.strip()]
+    all_ids = []
+    for line in lines:
+        ids = tokenizer.encode(line, add_special_tokens=False)
+        all_ids.extend(ids)
+
+    import torch as _torch
+    input_ids = _torch.tensor(all_ids, dtype=_torch.long)
 
     nlls = []
     for start in range(0, len(input_ids), max_ctx):
