@@ -26,6 +26,17 @@ import argparse
 import math
 import torch
 from pathlib import Path
+
+# --- Hotfix: PEFT + torchao version compatibility crash ------------------
+# Some versions of PEFT raise an ImportError if an incompatible version
+# of torchao is installed (e.g., in Google Colab). Mock this check to False.
+try:
+    import peft.import_utils
+    peft.import_utils.is_torchao_available = lambda: False
+except Exception:
+    pass
+# -------------------------------------------------------------------------
+
 from peft import LoraConfig, get_peft_model, PeftModel, TaskType
 from transformers import TrainingArguments, AutoTokenizer
 from trl import DPOTrainer
