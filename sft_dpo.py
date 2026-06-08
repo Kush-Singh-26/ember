@@ -27,7 +27,7 @@ import math
 import torch
 from pathlib import Path
 from peft import LoraConfig, get_peft_model, PeftModel, TaskType
-from transformers import TrainingArguments, AutoTokenizer, DataCollatorWithPadding
+from transformers import TrainingArguments, AutoTokenizer
 from trl import SFTTrainer, DPOTrainer
 from datasets import load_dataset, concatenate_datasets, Dataset, IterableDataset
 
@@ -168,8 +168,16 @@ def add_special_tokens(tokenizer, model):
     """
     Add ChatML special tokens to the tokenizer and resize model embedding
     matrix to accommodate them. Returns number of new tokens added.
+
+    Works with both slow tokenizers (have .additional_special_tokens) and
+    fast tokenizers (TokenizersBackend, which only exposes .all_special_tokens).
     """
-    existing = set(tokenizer.additional_special_tokens)
+    # Robust access — fast tokenizers raise AttributeError on .additional_special_tokens
+    try:
+        existing = set(tokenizer.additional_special_tokens)
+    except AttributeError:
+        existing = set(tokenizer.all_special_tokens)
+
     new_tokens = [t for t in SPECIAL_TOKENS["additional_special_tokens"] if t not in existing]
 
     if not new_tokens:
@@ -185,7 +193,8 @@ def add_special_tokens(tokenizer, model):
     new_size = model.model.embed_tokens.weight.shape[0]
 
     with torch.no_grad():
-        mean_emb = model.model.embed_tokens.weight[:old_size].mean(0)
+        # Keep mean_emb on the same device as the embedding weight
+        mean_emb = model.model.embed_tokens.weight[:old_size].mean(0).detach()
         model.model.embed_tokens.weight[old_size:] = mean_emb.unsqueeze(0).expand(new_size - old_size, -1)
 
     print(f"  ✅ Added {n_added} special tokens. Embedding: {old_size} → {new_size}")
@@ -352,7 +361,11 @@ def run_sft(
     tokenizer.save_pretrained(output_dir)
 
     # 3. Enable gradient checkpointing (essential for T4 memory)
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    # gradient_checkpointing_kwargs only accepted in transformers ≥ 4.36
+    try:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    except TypeError:
+        model.gradient_checkpointing_enable()
 
     # 4. LoRA config — rank 64, all projection layers
     lora_config = LoraConfig(
@@ -367,23 +380,17 @@ def run_sft(
         task_type=TaskType.CAUSAL_LM,
     )
 
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(f"  LoRA: {trainable:,} / {total:,} trainable parameters ({100*trainable/total:.1f}%)")
-
     # 5. Build mixed SFT dataset
     dataset = build_sft_dataset()
 
     # 6. Loss masking — only trains on tokens AFTER <|im_start|>assistant\n
-    #    Uses TRL's DataCollatorForCompletionOnlyLM if available, otherwise
-    #    falls back to our self-contained implementation (defined at import time).
     response_template = "<|im_start|>assistant\n"
     collator = DataCollatorForCompletionOnlyLM(
         response_template=response_template,
         tokenizer=tokenizer,
         mlm=False,
     )
-    print(f"  Loss masking: active (response template = {repr(response_template)})  [collator: {type(collator).__name__}]")
+    print(f"  Loss masking: active  [collator: {type(collator).__name__}]")
 
     # 7. Training arguments
     training_args = TrainingArguments(
@@ -406,16 +413,38 @@ def run_sft(
         gradient_checkpointing=True,
     )
 
-    # 8. SFT Trainer
-    trainer = SFTTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-        peft_config=lora_config,
-        data_collator=collator,
-        dataset_text_field="text",
-        max_seq_length=max_seq_length,
-    )
+    # 8. SFT Trainer — API changed in TRL ≥ 0.9 (dataset_text_field → deprecated,
+    #    max_seq_length moved to SFTConfig). Try new API first, fall back to old.
+    try:
+        from trl import SFTConfig
+        sft_config = SFTConfig(
+            **training_args.to_dict(),
+            max_seq_length=max_seq_length,
+            dataset_text_field="text",
+        )
+        trainer = SFTTrainer(
+            model=model,
+            args=sft_config,
+            train_dataset=dataset,
+            peft_config=lora_config,
+            data_collator=collator,
+        )
+    except (ImportError, TypeError):
+        # Older TRL: these kwargs belong directly on SFTTrainer
+        trainer = SFTTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=dataset,
+            peft_config=lora_config,
+            data_collator=collator,
+            dataset_text_field="text",
+            max_seq_length=max_seq_length,
+        )
+
+    # Print trainable param count AFTER PEFT wrapping
+    trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in trainer.model.parameters())
+    print(f"  LoRA: {trainable:,} / {total:,} trainable params ({100*trainable/total:.1f}%)")
 
     print(f"\nLaunching SFT: {max_steps} steps, LR={2e-4}, seq_len={max_seq_length}")
     trainer.train()
@@ -505,7 +534,10 @@ def run_dpo(
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    try:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    except TypeError:
+        model.gradient_checkpointing_enable()
 
     dataset = build_dpo_dataset()
 
@@ -528,16 +560,20 @@ def run_dpo(
         gradient_checkpointing=True,
     )
 
-    trainer = DPOTrainer(
+    # DPOTrainer: 'tokenizer' kwarg renamed to 'processing_class' in TRL ≥ 0.9
+    dpo_kwargs = dict(
         model=model,
-        ref_model=None,          # TRL auto-creates ref from PEFT base
+        ref_model=None,
         beta=0.1,
         args=training_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
         max_length=max_seq_length,
         max_prompt_length=max_seq_length // 2,
     )
+    try:
+        trainer = DPOTrainer(processing_class=tokenizer, **dpo_kwargs)
+    except TypeError:
+        trainer = DPOTrainer(tokenizer=tokenizer, **dpo_kwargs)
 
     print(f"\nLaunching DPO: {max_steps} steps, beta=0.1")
     trainer.train()
