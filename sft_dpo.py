@@ -146,6 +146,7 @@ def load_base_model(model_path: str, device: str):
     print(f"Loading base model from {model_path}...")
     config = EmberConfig.from_pretrained(model_path)
     model = EmberForCausalLM(config)
+    model.config._name_or_path = "Kush26/ember"
 
     weights_path = os.path.join(model_path, "model.safetensors")
     state_dict = load_file(weights_path)
