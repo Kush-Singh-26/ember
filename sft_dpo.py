@@ -213,13 +213,15 @@ def format_chatml(system: str, user: str, assistant: str) -> str:
     return "\n".join(parts)
 
 
-def load_openhermes(max_samples: int = 50_000) -> Dataset:
+def load_openhermes(max_samples: int = 8_000) -> Dataset:
     """
     OpenHermes-2.5: GPT-4 generated, diverse English instructions.
     Schema: {conversations: [{from: 'human'|'gpt'|'system', value: str}]}
+    Default: 8K samples (~200 MB RAM) — safe for Colab T4's 12 GB system RAM.
     """
-    print("  Loading OpenHermes-2.5...")
-    ds = load_dataset("teknium/OpenHermes-2.5", split="train", streaming=True)
+    print(f"  Loading OpenHermes-2.5 ({max_samples:,} samples)...")
+    # .take() limits how many rows are ever fetched from the stream — true streaming cap
+    ds = load_dataset("teknium/OpenHermes-2.5", split="train", streaming=True).take(max_samples * 2)
 
     rows = []
     for item in ds:
@@ -240,14 +242,15 @@ def load_openhermes(max_samples: int = 50_000) -> Dataset:
     return Dataset.from_list(rows)
 
 
-def load_anudesh(max_samples: int = 10_000) -> Dataset:
+def load_anudesh(max_samples: int = 3_000) -> Dataset:
     """
     Anudesh (AI4Bharat): Native Hindi instruction-following dataset.
     Falls back to translated Alpaca if unavailable.
+    Default: 3K samples — safe for Colab RAM.
     """
-    print("  Loading Hindi instruction dataset...")
+    print(f"  Loading Hindi instruction dataset ({max_samples:,} samples)...")
     try:
-        ds = load_dataset("ai4bharat/anudesh", split="train", streaming=True)
+        ds = load_dataset("ai4bharat/anudesh", split="train", streaming=True).take(max_samples * 2)
         rows = []
         for item in ds:
             if len(rows) >= max_samples:
@@ -265,7 +268,7 @@ def load_anudesh(max_samples: int = 10_000) -> Dataset:
 
     # Fallback: filter Hindi samples from multilingual Alpaca
     try:
-        ds = load_dataset("iamshnoo/alpaca-cleaned-hindi", split="train", streaming=True)
+        ds = load_dataset("iamshnoo/alpaca-cleaned-hindi", split="train", streaming=True).take(max_samples * 2)
         rows = []
         for item in ds:
             if len(rows) >= max_samples:
@@ -282,13 +285,14 @@ def load_anudesh(max_samples: int = 10_000) -> Dataset:
         return Dataset.from_list([])
 
 
-def load_code_instructions(max_samples: int = 10_000) -> Dataset:
+def load_code_instructions(max_samples: int = 3_000) -> Dataset:
     """
     Python code instruction dataset (Alpaca format).
+    Default: 3K samples — safe for Colab RAM.
     """
-    print("  Loading code instruction dataset...")
+    print(f"  Loading code instruction dataset ({max_samples:,} samples)...")
     try:
-        ds = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train", streaming=True)
+        ds = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train", streaming=True).take(max_samples * 2)
         rows = []
         for item in ds:
             if len(rows) >= max_samples:
@@ -305,11 +309,17 @@ def load_code_instructions(max_samples: int = 10_000) -> Dataset:
         return Dataset.from_list([])
 
 
-def build_sft_dataset(en_samples: int = 50_000, hi_samples: int = 10_000, code_samples: int = 10_000) -> Dataset:
+def build_sft_dataset(en_samples: int = 8_000, hi_samples: int = 3_000, code_samples: int = 3_000) -> Dataset:
     """
-    Build the mixed SFT dataset: English + Hindi + Code, deduplicated and shuffled.
+    Build the mixed SFT dataset: English + Hindi + Code, shuffled.
+    Defaults are tuned to fit in Colab T4's 12 GB system RAM (~14K total).
+    With effective batch 32 and 2000 steps = 64K examples consumed,
+    the dataset is repeated ~4-5x — fine for SFT.
+    Increase sizes if running on a machine with more RAM (e.g. A100 node).
     """
-    print("Building SFT dataset mix...")
+    import psutil
+    ram_gb = psutil.virtual_memory().available / 1e9
+    print(f"Building SFT dataset mix... (available RAM: {ram_gb:.1f} GB)")
     parts = []
 
     en_ds = load_openhermes(max_samples=en_samples)
