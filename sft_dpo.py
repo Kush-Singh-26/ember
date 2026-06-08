@@ -250,16 +250,17 @@ def load_anudesh(max_samples: int = 3_000) -> Dataset:
     """
     print(f"  Loading Hindi instruction dataset ({max_samples:,} samples)...")
     try:
-        ds = load_dataset("ai4bharat/anudesh", split="train", streaming=True).take(max_samples * 2)
+        ds = load_dataset("ai4bharat/indic-instruct-data-v0.1", "anudesh", split="hi", streaming=True).take(max_samples * 2)
         rows = []
         for item in ds:
             if len(rows) >= max_samples:
                 break
-            instruction = item.get("instruction") or item.get("input") or ""
-            response = item.get("output") or item.get("response") or ""
-            if not instruction or not response or len(response.strip()) < 20:
+            convs = item.get("messages", [])
+            user = next((c["content"] for c in convs if c.get("role") == "user"), None)
+            assistant = next((c["content"] for c in convs if c.get("role") in ("assistant", "gpt")), None)
+            if not user or not assistant or len(assistant.strip()) < 20:
                 continue
-            rows.append({"text": format_chatml(CHATML_SYSTEM, instruction, response)})
+            rows.append({"text": format_chatml(CHATML_SYSTEM, user.strip(), assistant.strip())})
         if rows:
             print(f"    ✅ Anudesh: {len(rows):,} samples")
             return Dataset.from_list(rows)
