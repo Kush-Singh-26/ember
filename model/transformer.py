@@ -359,19 +359,22 @@ class EmberForCausalLM(EmberPreTrainedModel, GenerationMixin):
 
     def _initialize_missing_keys(self, is_quantized: bool = False) -> None:
         """
-        Override to skip re-initialization of missing keys.
-
-        In HF 5.x, after loading the checkpoint, this method is called for any
-        parameter that was not found in the checkpoint. For EmberForCausalLM, the
-        only missing key is `lm_head.weight`, which is intentionally absent because
-        it is tied to `model.embed_tokens.weight`. Re-initializing it here would
-        silently overwrite the correctly-loaded embed_tokens weights with random
-        noise (std=0.02) through the shared memory reference.
-
-        The subsequent `tie_weights()` call correctly wires lm_head.weight to
-        embed_tokens.weight, so no initialization is needed here.
+        Override to skip re-initialization of missing keys that are tied (like lm_head.weight),
+        while ensuring non-persistent buffers like rotary embeddings (inv_freq, cos_cached, sin_cached)
+        are correctly materialized and initialized on the target device.
         """
-        pass  # Intentional no-op: tied weights are wired by tie_weights(), not re-initialized
+        for layer in self.model.layers:
+            emb = layer.self_attn.rotary_emb
+            device = layer.self_attn.v_proj.weight.device
+            dtype = layer.self_attn.v_proj.weight.dtype
+            
+            # Re-compute inv_freq on the actual device
+            inv_freq = 1.0 / (emb.base ** (torch.arange(0, emb.dim, 2, dtype=torch.float32, device=device) / emb.dim))
+            emb.register_buffer("inv_freq", inv_freq, persistent=False)
+            
+            # Re-compute cache
+            emb._set_cos_sin_cache(max_len=emb.max_position_embeddings, device=device, dtype=dtype)
+
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.model.embed_tokens
