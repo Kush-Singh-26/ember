@@ -27,9 +27,79 @@ import math
 import torch
 from pathlib import Path
 from peft import LoraConfig, get_peft_model, PeftModel, TaskType
-from transformers import TrainingArguments, AutoTokenizer
-from trl import SFTTrainer, DPOTrainer, DataCollatorForCompletionOnlyLM
+from transformers import TrainingArguments, AutoTokenizer, DataCollatorWithPadding
+from trl import SFTTrainer, DPOTrainer
 from datasets import load_dataset, concatenate_datasets, Dataset, IterableDataset
+
+# --- Portable DataCollatorForCompletionOnlyLM ----------------------------
+# TRL moved this class between versions. Try three locations before falling
+# back to our own implementation so the code works on any installed version.
+try:
+    from trl import DataCollatorForCompletionOnlyLM
+except ImportError:
+    try:
+        from trl.trainer import DataCollatorForCompletionOnlyLM
+    except ImportError:
+        import torch
+        from dataclasses import dataclass
+        from typing import Any, Dict, List
+
+        @dataclass
+        class DataCollatorForCompletionOnlyLM:
+            """
+            Portable fallback: masks all prompt tokens with -100 so that loss
+            is computed only on the assistant's response tokens.
+            """
+            tokenizer: Any
+            response_template: str
+            mlm: bool = False
+
+            def __post_init__(self):
+                self._template_ids = self.tokenizer.encode(
+                    self.response_template, add_special_tokens=False
+                )
+
+            def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+                import torch as _t
+                input_ids_list = [f["input_ids"] for f in features]
+                attention_mask_list = [f.get("attention_mask", [1] * len(f["input_ids"])) for f in features]
+
+                max_len = max(len(ids) for ids in input_ids_list)
+                pad_id = self.tokenizer.pad_token_id or 0
+
+                batch_ids, batch_mask, batch_labels = [], [], []
+                for ids, mask in zip(input_ids_list, attention_mask_list):
+                    pad_len = max_len - len(ids)
+                    padded = ids + [pad_id] * pad_len
+                    padded_mask = mask + [0] * pad_len
+                    labels = list(padded)  # start as copy
+
+                    # Find the first occurrence of the response template
+                    tpl = self._template_ids
+                    tpl_len = len(tpl)
+                    response_start = None
+                    for j in range(len(ids) - tpl_len + 1):
+                        if ids[j : j + tpl_len] == tpl:
+                            response_start = j + tpl_len
+                            break
+
+                    # Mask everything before response start and all padding
+                    mask_until = response_start if response_start is not None else len(padded)
+                    for j in range(mask_until):
+                        labels[j] = -100
+                    for j in range(len(ids), max_len):  # padding positions
+                        labels[j] = -100
+
+                    batch_ids.append(padded)
+                    batch_mask.append(padded_mask)
+                    batch_labels.append(labels)
+
+                return {
+                    "input_ids": _t.tensor(batch_ids, dtype=_t.long),
+                    "attention_mask": _t.tensor(batch_mask, dtype=_t.long),
+                    "labels": _t.tensor(batch_labels, dtype=_t.long),
+                }
+# -------------------------------------------------------------------------
 
 # Ensure project root is in path for model imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -304,14 +374,16 @@ def run_sft(
     # 5. Build mixed SFT dataset
     dataset = build_sft_dataset()
 
-    # 6. Loss masking via DataCollatorForCompletionOnlyLM
-    #    Only computes loss on tokens AFTER <|im_start|>assistant\n
+    # 6. Loss masking — only trains on tokens AFTER <|im_start|>assistant\n
+    #    Uses TRL's DataCollatorForCompletionOnlyLM if available, otherwise
+    #    falls back to our self-contained implementation (defined at import time).
     response_template = "<|im_start|>assistant\n"
     collator = DataCollatorForCompletionOnlyLM(
         response_template=response_template,
         tokenizer=tokenizer,
         mlm=False,
     )
+    print(f"  Loss masking: active (response template = {repr(response_template)})  [collator: {type(collator).__name__}]")
 
     # 7. Training arguments
     training_args = TrainingArguments(
