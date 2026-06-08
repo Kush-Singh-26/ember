@@ -231,8 +231,13 @@ def load_openhermes(max_samples: int = 8_000) -> Dataset:
     Default: 8K samples (~200 MB RAM) — safe for Colab T4's 12 GB system RAM.
     """
     print(f"  Loading OpenHermes-2.5 ({max_samples:,} samples)...")
-    # .take() limits how many rows are ever fetched from the stream — true streaming cap
-    ds = load_dataset("teknium/OpenHermes-2.5", split="train", streaming=True).take(max_samples * 2)
+    try:
+        # Load normally (non-streaming) to utilize memory mapping (Arrow) and save RAM
+        ds = load_dataset("teknium/OpenHermes-2.5", split="train")
+        ds = ds.select(range(min(len(ds), max_samples * 2)))
+    except Exception as e:
+        print(f"    ⚠️  Failed to load OpenHermes-2.5 ({e})")
+        return Dataset.from_list([])
 
     rows = []
     for item in ds:
@@ -261,7 +266,9 @@ def load_anudesh(max_samples: int = 3_000) -> Dataset:
     """
     print(f"  Loading Hindi instruction dataset ({max_samples:,} samples)...")
     try:
-        ds = load_dataset("ai4bharat/indic-instruct-data-v0.1", "anudesh", split="hi", streaming=True).take(max_samples * 2)
+        # Load normally (non-streaming) to utilize memory mapping (Arrow) and save RAM
+        ds = load_dataset("ai4bharat/indic-instruct-data-v0.1", "anudesh", split="hi")
+        ds = ds.select(range(min(len(ds), max_samples * 2)))
         rows = []
         for item in ds:
             if len(rows) >= max_samples:
@@ -280,7 +287,8 @@ def load_anudesh(max_samples: int = 3_000) -> Dataset:
 
     # Fallback: filter Hindi samples from multilingual Alpaca
     try:
-        ds = load_dataset("iamshnoo/alpaca-cleaned-hindi", split="train", streaming=True).take(max_samples * 2)
+        ds = load_dataset("iamshnoo/alpaca-cleaned-hindi", split="train")
+        ds = ds.select(range(min(len(ds), max_samples * 2)))
         rows = []
         for item in ds:
             if len(rows) >= max_samples:
@@ -304,7 +312,8 @@ def load_code_instructions(max_samples: int = 3_000) -> Dataset:
     """
     print(f"  Loading code instruction dataset ({max_samples:,} samples)...")
     try:
-        ds = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train", streaming=True).take(max_samples * 2)
+        ds = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
+        ds = ds.select(range(min(len(ds), max_samples * 2)))
         rows = []
         for item in ds:
             if len(rows) >= max_samples:
@@ -497,7 +506,8 @@ def build_dpo_dataset(max_samples: int = 10_000) -> Dataset:
     Schema: {prompt, chosen: [{role, content}], rejected: [{role, content}]}
     """
     print("Building DPO dataset...")
-    ds = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split="train_prefs", streaming=True)
+    ds = load_dataset("HuggingFaceH4/ultrafeedback_binarized", split="train_prefs")
+    ds = ds.select(range(min(len(ds), max_samples * 2)))
 
     rows = []
     for item in ds:
