@@ -381,6 +381,9 @@ def run_sft(
     lora_r: int = 64,
     max_steps: int = 2000,
     max_seq_length: int = 2048,
+    batch_size: int = 8,
+    grad_accum: int = 4,
+    grad_ckpt: bool = True,
 ):
     print("\n" + "=" * 60)
     print("  Phase 1: Supervised Fine-Tuning (SFT)")
@@ -388,6 +391,12 @@ def run_sft(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_bf16 = torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
+    if device == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"  GPU detected: {gpu_name}")
+        if "T4" in gpu_name:
+            print("  ⚠️ Tesla T4 detected. Forcing FP16 precision (BF16 is emulation-only on T4 and extremely slow).")
+            use_bf16 = False
     print(f"Device: {device} | Precision: {'bf16' if use_bf16 else 'fp16'}")
 
     # 1. Load tokenizer and model
@@ -403,10 +412,14 @@ def run_sft(
 
     # 3. Enable gradient checkpointing (essential for T4 memory)
     # gradient_checkpointing_kwargs only accepted in transformers ≥ 4.36
-    try:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    except TypeError:
-        model.gradient_checkpointing_enable()
+    if grad_ckpt:
+        try:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        except TypeError:
+            model.gradient_checkpointing_enable()
+        print("  Gradient Checkpointing: enabled")
+    else:
+        print("  Gradient Checkpointing: disabled (faster training, uses more VRAM)")
 
     # 4. LoRA config — rank 64, all projection layers
     lora_config = LoraConfig(
@@ -436,8 +449,8 @@ def run_sft(
     # 7. Training arguments
     training_args = TrainingArguments(
         output_dir=os.path.join(output_dir, "checkpoints"),
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=16,      # Effective batch = 32
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
         learning_rate=2e-4,                  # LoRA uses higher LR than full fine-tune
         weight_decay=0.01,
         max_steps=max_steps,
@@ -451,7 +464,7 @@ def run_sft(
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        gradient_checkpointing=True,
+        gradient_checkpointing=grad_ckpt,
     )
 
     # 8. Pre-tokenize dataset then train with plain HuggingFace Trainer.
@@ -552,6 +565,9 @@ def run_dpo(
     output_dir: str,
     max_steps: int = 500,
     max_seq_length: int = 2048,
+    batch_size: int = 2,
+    grad_accum: int = 16,
+    grad_ckpt: bool = True,
 ):
     print("\n" + "=" * 60)
     print("  Phase 2: Direct Preference Optimization (DPO)")
@@ -559,6 +575,13 @@ def run_dpo(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_bf16 = torch.cuda.is_bf16_supported() if torch.cuda.is_available() else False
+    if device == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"  GPU detected: {gpu_name}")
+        if "T4" in gpu_name:
+            print("  ⚠️ Tesla T4 detected. Forcing FP16 precision (BF16 is emulation-only on T4 and extremely slow).")
+            use_bf16 = False
+    print(f"Device: {device} | Precision: {'bf16' if use_bf16 else 'fp16'}")
 
     # Load tokenizer and merged SFT model
     tokenizer = load_tokenizer(model_path)
@@ -577,17 +600,21 @@ def run_dpo(
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
-    try:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    except TypeError:
-        model.gradient_checkpointing_enable()
+    if grad_ckpt:
+        try:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        except TypeError:
+            model.gradient_checkpointing_enable()
+        print("  Gradient Checkpointing: enabled")
+    else:
+        print("  Gradient Checkpointing: disabled")
 
     dataset = build_dpo_dataset()
 
     training_args = TrainingArguments(
         output_dir=os.path.join(output_dir, "dpo_checkpoints"),
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=32,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
         learning_rate=5e-7,
         weight_decay=0.01,
         max_steps=max_steps,
@@ -600,7 +627,7 @@ def run_dpo(
         bf16=use_bf16,
         report_to="none",
         remove_unused_columns=False,
-        gradient_checkpointing=True,
+        gradient_checkpointing=grad_ckpt,
     )
 
     # DPOTrainer: 'tokenizer' kwarg renamed to 'processing_class' in TRL ≥ 0.9
@@ -646,6 +673,12 @@ if __name__ == "__main__":
                         help="Training steps (default: 2000 for SFT, 500 for DPO)")
     parser.add_argument("--max_seq_length", type=int, default=2048,
                         help="Max sequence length (default: 2048)")
+    parser.add_argument("--batch_size", type=int, default=8,
+                        help="Per-device SFT training batch size (default: 8)")
+    parser.add_argument("--grad_accum", type=int, default=4,
+                        help="SFT gradient accumulation steps (default: 4)")
+    parser.add_argument("--no_grad_ckpt", action="store_true",
+                        help="Disable gradient checkpointing to speed up training (uses more VRAM)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.model):
@@ -661,14 +694,24 @@ if __name__ == "__main__":
             lora_r=args.lora_r,
             max_steps=args.max_steps,
             max_seq_length=args.max_seq_length,
+            batch_size=args.batch_size,
+            grad_accum=args.grad_accum,
+            grad_ckpt=not args.no_grad_ckpt,
         )
 
     if args.phase in ("dpo", "both"):
+        # Scale DPO batch size down / accumulation up due to dual-model memory requirement
+        dpo_batch = max(1, args.batch_size // 4)
+        dpo_accum = args.grad_accum * 4
+        
         dpo_path = run_dpo(
             model_path=sft_merged,
             output_dir=os.path.join(args.output_dir, "dpo"),
             max_steps=500 if args.phase == "both" else args.max_steps,
             max_seq_length=args.max_seq_length,
+            batch_size=dpo_batch,
+            grad_accum=dpo_accum,
+            grad_ckpt=not args.no_grad_ckpt,
         )
 
     print("\n✅ Post-training pipeline complete.")
