@@ -423,40 +423,41 @@ def run_sft(
         gradient_checkpointing=True,
     )
 
-    # 8. SFT Trainer — API changed in TRL ≥ 0.9 (dataset_text_field → deprecated,
-    #    max_seq_length moved to SFTConfig). Try new API first, fall back to old.
-    try:
-        from trl import SFTConfig
-        sft_config = SFTConfig(
-            **training_args.to_dict(),
-            max_seq_length=max_seq_length,
-            dataset_text_field="text",
+    # 8. Pre-tokenize dataset then train with plain HuggingFace Trainer.
+    #    Avoids ALL SFTTrainer/SFTConfig API version issues — works on any TRL version.
+    print(f"  Tokenizing dataset (max_seq_length={max_seq_length})...")
+    def tokenize_fn(examples):
+        return tokenizer(
+            examples["text"],
+            truncation=True,
+            max_length=max_seq_length,
+            padding=False,
         )
-        trainer = SFTTrainer(
-            model=model,
-            args=sft_config,
-            train_dataset=dataset,
-            peft_config=lora_config,
-            data_collator=collator,
-        )
-    except (ImportError, TypeError):
-        # Older TRL: these kwargs belong directly on SFTTrainer
-        trainer = SFTTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=dataset,
-            peft_config=lora_config,
-            data_collator=collator,
-            dataset_text_field="text",
-            max_seq_length=max_seq_length,
-        )
+    tokenized = dataset.map(
+        tokenize_fn,
+        batched=True,
+        remove_columns=["text"],
+        desc="Tokenizing",
+    )
+    print(f"  ✅ Tokenized {len(tokenized):,} examples")
 
-    # Print trainable param count AFTER PEFT wrapping
-    trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in trainer.model.parameters())
+    # Apply LoRA manually (SFTTrainer did this internally; we do it explicitly now)
+    from peft import get_peft_model as _get_peft_model
+    peft_model = _get_peft_model(model, lora_config)
+
+    trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in peft_model.parameters())
     print(f"  LoRA: {trainable:,} / {total:,} trainable params ({100*trainable/total:.1f}%)")
 
-    print(f"\nLaunching SFT: {max_steps} steps, LR={2e-4}, seq_len={max_seq_length}")
+    from transformers import Trainer
+    trainer = Trainer(
+        model=peft_model,
+        args=training_args,
+        train_dataset=tokenized,
+        data_collator=collator,
+    )
+
+    print(f"\nLaunching SFT: {max_steps} steps, LR=2e-4, seq_len={max_seq_length}")
     trainer.train()
 
     # 9. Save adapter
