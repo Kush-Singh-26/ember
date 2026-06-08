@@ -28,7 +28,7 @@ import torch
 from pathlib import Path
 from peft import LoraConfig, get_peft_model, PeftModel, TaskType
 from transformers import TrainingArguments, AutoTokenizer
-from trl import SFTTrainer, DPOTrainer
+from trl import DPOTrainer
 from datasets import load_dataset, concatenate_datasets, Dataset, IterableDataset
 
 # --- Portable DataCollatorForCompletionOnlyLM ----------------------------
