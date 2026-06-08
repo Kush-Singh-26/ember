@@ -31,8 +31,18 @@ from pathlib import Path
 # Some versions of PEFT raise an ImportError if an incompatible version
 # of torchao is installed (e.g., in Google Colab). Mock this check to False.
 try:
+    import peft
     import peft.import_utils
     peft.import_utils.is_torchao_available = lambda: False
+    
+    import sys
+    for name, module in list(sys.modules.items()):
+        if name.startswith("peft") and module is not None:
+            if hasattr(module, "is_torchao_available"):
+                try:
+                    module.is_torchao_available = lambda: False
+                except Exception:
+                    pass
 except Exception:
     pass
 # -------------------------------------------------------------------------
