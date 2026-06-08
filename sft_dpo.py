@@ -384,6 +384,8 @@ def run_sft(
     batch_size: int = 8,
     grad_accum: int = 4,
     grad_ckpt: bool = True,
+    push_to_hub: bool = False,
+    hub_model_id: str = None,
 ):
     print("\n" + "=" * 60)
     print("  Phase 1: Supervised Fine-Tuning (SFT)")
@@ -465,6 +467,10 @@ def run_sft(
         remove_unused_columns=False,
         dataloader_num_workers=0,
         gradient_checkpointing=grad_ckpt,
+        push_to_hub=push_to_hub,
+        hub_model_id=hub_model_id,
+        hub_strategy="checkpoint",
+        hub_token=os.environ.get("HF_TOKEN"),
     )
 
     # 8. Pre-tokenize dataset then train with plain HuggingFace Trainer.
@@ -501,8 +507,21 @@ def run_sft(
         data_collator=collator,
     )
 
+    # Detect checkpoint to resume from
+    resume_from_checkpoint = None
+    checkpoints_dir = os.path.join(output_dir, "checkpoints")
+    if os.path.isdir(checkpoints_dir):
+        try:
+            subdirs = [os.path.join(checkpoints_dir, d) for d in os.listdir(checkpoints_dir) if d.startswith("checkpoint-")]
+            if subdirs:
+                subdirs.sort(key=lambda x: int(x.split("-")[-1]))
+                resume_from_checkpoint = subdirs[-1]
+                print(f"  Found existing checkpoint: {resume_from_checkpoint}. Resuming SFT training...")
+        except Exception as e:
+            print(f"  ⚠️ Failed to check for checkpoints: {e}")
+
     print(f"\nLaunching SFT: {max_steps} steps, LR=2e-4, seq_len={max_seq_length}")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # 9. Save adapter
     adapter_path = os.path.join(output_dir, "sft_adapter")
@@ -568,6 +587,8 @@ def run_dpo(
     batch_size: int = 2,
     grad_accum: int = 16,
     grad_ckpt: bool = True,
+    push_to_hub: bool = False,
+    hub_model_id: str = None,
 ):
     print("\n" + "=" * 60)
     print("  Phase 2: Direct Preference Optimization (DPO)")
@@ -628,6 +649,10 @@ def run_dpo(
         report_to="none",
         remove_unused_columns=False,
         gradient_checkpointing=grad_ckpt,
+        push_to_hub=push_to_hub,
+        hub_model_id=hub_model_id,
+        hub_strategy="checkpoint",
+        hub_token=os.environ.get("HF_TOKEN"),
     )
 
     # DPOTrainer: 'tokenizer' kwarg renamed to 'processing_class' in TRL ≥ 0.9
@@ -645,8 +670,21 @@ def run_dpo(
     except TypeError:
         trainer = DPOTrainer(tokenizer=tokenizer, **dpo_kwargs)
 
+    # Detect checkpoint to resume from
+    resume_from_checkpoint = None
+    checkpoints_dir = os.path.join(output_dir, "dpo_checkpoints")
+    if os.path.isdir(checkpoints_dir):
+        try:
+            subdirs = [os.path.join(checkpoints_dir, d) for d in os.listdir(checkpoints_dir) if d.startswith("checkpoint-")]
+            if subdirs:
+                subdirs.sort(key=lambda x: int(x.split("-")[-1]))
+                resume_from_checkpoint = subdirs[-1]
+                print(f"  Found existing checkpoint: {resume_from_checkpoint}. Resuming DPO training...")
+        except Exception as e:
+            print(f"  ⚠️ Failed to check for checkpoints: {e}")
+
     print(f"\nLaunching DPO: {max_steps} steps, beta=0.1")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     # Merge and save
     merged_model = trainer.model.merge_and_unload()
@@ -679,6 +717,10 @@ if __name__ == "__main__":
                         help="SFT gradient accumulation steps (default: 4)")
     parser.add_argument("--no_grad_ckpt", action="store_true",
                         help="Disable gradient checkpointing to speed up training (uses more VRAM)")
+    parser.add_argument("--push_to_hub", action="store_true",
+                        help="Push checkpoints to Hugging Face Hub during training")
+    parser.add_argument("--hub_model_id", type=str, default=None,
+                        help="Hugging Face model repository ID (default: username/model-phase)")
     args = parser.parse_args()
 
     if not os.path.isdir(args.model):
@@ -686,6 +728,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     sft_merged = args.model
+
+    hub_model_id = args.hub_model_id
+    if args.push_to_hub and hub_model_id is None:
+        if args.phase in ("sft", "both"):
+            hub_model_id = "Kush26/ember-sft"
+        else:
+            hub_model_id = "Kush26/ember-dpo"
 
     if args.phase in ("sft", "both"):
         sft_adapter, sft_merged = run_sft(
@@ -697,6 +746,8 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             grad_accum=args.grad_accum,
             grad_ckpt=not args.no_grad_ckpt,
+            push_to_hub=args.push_to_hub,
+            hub_model_id=hub_model_id,
         )
 
     if args.phase in ("dpo", "both"):
@@ -712,6 +763,8 @@ if __name__ == "__main__":
             batch_size=dpo_batch,
             grad_accum=dpo_accum,
             grad_ckpt=not args.no_grad_ckpt,
+            push_to_hub=args.push_to_hub,
+            hub_model_id=hub_model_id,
         )
 
     print("\n✅ Post-training pipeline complete.")
